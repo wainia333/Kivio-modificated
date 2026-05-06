@@ -839,6 +839,7 @@ export default function Lens() {
   const [translateDurationMs, setTranslateDurationMs] = useState<number | null>(null)
   const [showTranslateOriginal, setShowTranslateOriginal] = useState(true)
   const [translateRetranslating, setTranslateRetranslating] = useState(false)
+  const [translateCardHeight, setTranslateCardHeight] = useState<number | null>(null)
   const [translateNow, setTranslateNow] = useState(() => Date.now())
   const translateStartRef = useRef<number | null>(null)
   const translateEditDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -2290,6 +2291,50 @@ export default function Lens() {
     ? fullscreenMetricsRef.current?.ANSWER_H || metrics.ANSWER_H
     : metrics.ANSWER_H
 
+  const measureTranslateCardHeight = useCallback(() => {
+    if (!showTranslateCard) {
+      setTranslateCardHeight(prev => (prev === null ? prev : null))
+      return
+    }
+
+    const rect = translateCardRef.current?.getBoundingClientRect()
+    const next = rect && rect.height >= 1 ? Math.ceil(rect.height) : null
+    setTranslateCardHeight(prev => {
+      if (prev === next) return prev
+      if (prev !== null && next !== null && Math.abs(prev - next) < 1) return prev
+      return next
+    })
+  }, [showTranslateCard])
+
+  useLayoutEffect(() => {
+    measureTranslateCardHeight()
+  }, [
+    measureTranslateCardHeight,
+    showTranslateOriginal,
+    stableAnswerHeight,
+    translateError,
+    translateOriginal,
+    translateRetranslating,
+    translateText,
+  ])
+
+  useEffect(() => {
+    if (!showTranslateCard) {
+      setTranslateCardHeight(prev => (prev === null ? prev : null))
+      return
+    }
+
+    const el = translateCardRef.current
+    if (!el || typeof ResizeObserver === 'undefined') {
+      measureTranslateCardHeight()
+      return
+    }
+
+    const observer = new ResizeObserver(() => measureTranslateCardHeight())
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [measureTranslateCardHeight, showTranslateCard])
+
   // 答案区展开方向 + 高度自适应：
   // 1) 下方空间够 ANSWER_H → 向下，目标高
   // 2) 上方空间够 → 向上，目标高
@@ -2595,6 +2640,7 @@ export default function Lens() {
   useEffect(() => {
     if (stage === 'select') return
     if (!floatingRebased) return
+    if (barNoTransition) return
 
     const w = barRect.width + FLOATING_PADDING * 2
     let h = READY_BAR_H + FLOATING_PADDING * 2
@@ -2605,7 +2651,10 @@ export default function Lens() {
 
     // translate 卡片预留空间
     if ((stage === 'translating' || stage === 'translated') && mode === 'translate') {
-      h = Math.max(h, READY_BAR_H + FLOATING_GAP + stableAnswerHeight + FLOATING_PADDING * 2)
+      h = Math.max(
+        h,
+        (translateCardHeight ?? (READY_BAR_H + FLOATING_GAP + stableAnswerHeight)) + FLOATING_PADDING * 2,
+      )
     }
 
     if (mode === 'chat' && historyOpen) {
@@ -2626,12 +2675,14 @@ export default function Lens() {
   }, [
     stage,
     answerLayout,
+    barNoTransition,
     barRect,
     floatingRebased,
     historyDropdownLayout.maxHeight,
     historyOpen,
     mode,
     stableAnswerHeight,
+    translateCardHeight,
   ])
 
   const beginFloatingPanelDrag = useCallback((e: React.MouseEvent<HTMLElement>) => {

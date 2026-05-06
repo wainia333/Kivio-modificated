@@ -125,6 +125,7 @@ export type Settings = {
      *  true 时 provider 可以是任意文字模型;false 时 provider 必须是多模态视觉模型。
      *  Apple Intelligence 作为 provider 时自动等同于 true(其 SDK 不支持图像)。 */
     useSystemOcr?: boolean
+    ocrPrompt?: string
     prompt?: string
   }
   lens: {
@@ -169,6 +170,7 @@ export type UpdateInfo = {
 // 默认提示词模板
 export type DefaultPromptTemplates = {
   translationTemplate: string
+  screenshotOcrPrompt?: string
   screenshotTranslationTemplate?: string
   lensPrompts: {
     zh: { system: string; question: string }

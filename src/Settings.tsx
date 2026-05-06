@@ -568,6 +568,7 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
         directTranslate: false,
         thinkingEnabled: false,
         streamEnabled: true,
+        ocrPrompt: '',
         prompt: ''
       }
       const nextScreenshotTranslation = { ...current, ...updates }
@@ -1355,20 +1356,37 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
                         <ChevronRight size={13} className="text-neutral-400 dark:text-neutral-500 group-open:rotate-90 transition-transform duration-200" strokeWidth={2.25} />
                         {t.customPrompts}
                       </summary>
-                      <div className="px-4 pb-4 space-y-2">
-                        <Label>{t.screenshotTranslationPrompt}</Label>
-                        <TextArea
-                          value={settings.screenshotTranslation?.prompt || ''}
-                          onChange={(v) => updateScreenshotTranslation({ prompt: v })}
-                          placeholder={t.screenshotTranslationPromptHint}
-                          rows={3}
-                        />
-                        {!settings.screenshotTranslation?.prompt?.trim() && (defaultPrompts?.screenshotTranslationTemplate || defaultPrompts?.translationTemplate) && (
-                          <DefaultPrompt
-                            label={t.defaultTemplate}
-                            content={defaultPrompts?.screenshotTranslationTemplate || defaultPrompts?.translationTemplate || ''}
+                      <div className="px-4 pb-4 space-y-4">
+                        <div>
+                          <Label>{t.screenshotOcrPrompt}</Label>
+                          <TextArea
+                            value={settings.screenshotTranslation?.ocrPrompt || ''}
+                            onChange={(v) => updateScreenshotTranslation({ ocrPrompt: v })}
+                            placeholder={t.screenshotOcrPromptHint}
+                            rows={4}
                           />
-                        )}
+                          {!settings.screenshotTranslation?.ocrPrompt?.trim() && defaultPrompts?.screenshotOcrPrompt && (
+                            <DefaultPrompt
+                              label={t.defaultTemplate}
+                              content={defaultPrompts.screenshotOcrPrompt}
+                            />
+                          )}
+                        </div>
+                        <div>
+                          <Label>{t.screenshotTranslationPrompt}</Label>
+                          <TextArea
+                            value={settings.screenshotTranslation?.prompt || ''}
+                            onChange={(v) => updateScreenshotTranslation({ prompt: v })}
+                            placeholder={t.screenshotTranslationPromptHint}
+                            rows={3}
+                          />
+                          {!settings.screenshotTranslation?.prompt?.trim() && (defaultPrompts?.screenshotTranslationTemplate || defaultPrompts?.translationTemplate) && (
+                            <DefaultPrompt
+                              label={t.defaultTemplate}
+                              content={defaultPrompts?.screenshotTranslationTemplate || defaultPrompts?.translationTemplate || ''}
+                            />
+                          )}
+                        </div>
                       </div>
                     </details>
                   </div>

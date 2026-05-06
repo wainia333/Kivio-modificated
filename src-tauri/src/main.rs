@@ -93,6 +93,7 @@ fn get_settings(state: State<AppState>) -> Settings {
 fn get_default_prompt_templates() -> serde_json::Value {
     serde_json::json!({
       "translationTemplate": DEFAULT_TRANSLATION_TEMPLATE,
+      "screenshotOcrPrompt": DEFAULT_SCREENSHOT_OCR_PROMPT,
       "screenshotTranslationTemplate": DEFAULT_SCREENSHOT_TRANSLATION_TEMPLATE,
       "lensPrompts": {
         "zh": {
@@ -1723,7 +1724,11 @@ async fn recognize_screenshot_text(
                 provider,
                 &model,
                 image_path,
-                DEFAULT_SCREENSHOT_OCR_PROMPT,
+                settings
+                    .screenshot_translation
+                    .ocr_prompt
+                    .as_deref()
+                    .unwrap_or(DEFAULT_SCREENSHOT_OCR_PROMPT),
                 retry_attempts,
                 thinking_enabled,
             )
@@ -3385,37 +3390,93 @@ fn restart_as_administrator(_app: &AppHandle) -> Result<(), String> {
 }
 
 /// 根据语言返回托盘菜单的标签文本
-fn tray_labels(lang: &str) -> (&'static str, &'static str, &'static str, &'static str) {
+fn tray_labels(
+    lang: &str,
+) -> (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+) {
     match lang {
         "en" => (
-            "Show Translator",
-            "Settings",
+            "Translate",
+            "Lens",
+            "OCR",
             "Restart as Administrator",
+            "Settings",
             "Quit",
         ),
-        _ => ("显示翻译器", "设置", "使用管理员身份重启", "退出"),
+        _ => ("翻译", "Lens", "OCR", "管理员身份重启", "设置", "退出"),
     }
 }
 
 /// 构建托盘菜单
-fn build_tray_menu(app: &AppHandle, lang: &str) -> Result<tauri::menu::Menu<tauri::Wry>, String> {
-    use tauri::menu::{Menu, MenuItem};
-    let (show_label, settings_label, restart_admin_label, quit_label) = tray_labels(lang);
-    let show = MenuItem::with_id(app, "show", show_label, true, None::<&str>)
-        .map_err(|e| e.to_string())?;
+fn build_tray_menu(
+    app: &AppHandle,
+    settings: &Settings,
+) -> Result<tauri::menu::Menu<tauri::Wry>, String> {
+    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+
+    let lang = settings.settings_language.as_deref().unwrap_or("zh");
+    let (translate_label, lens_label, ocr_label, restart_admin_label, settings_label, quit_label) =
+        tray_labels(lang);
+    let translator_hotkey = settings.hotkey.trim();
+    let lens_hotkey = settings.lens.hotkey.trim();
+    let ocr_hotkey = settings.screenshot_translation.hotkey.trim();
+
+    let translate = MenuItem::with_id(
+        app,
+        "translator",
+        translate_label,
+        true,
+        (!translator_hotkey.is_empty()).then_some(translator_hotkey),
+    )
+    .map_err(|e| e.to_string())?;
+    let lens = MenuItem::with_id(
+        app,
+        "lens",
+        lens_label,
+        true,
+        (!lens_hotkey.is_empty()).then_some(lens_hotkey),
+    )
+    .map_err(|e| e.to_string())?;
+    let ocr = MenuItem::with_id(
+        app,
+        "ocr",
+        ocr_label,
+        settings.screenshot_translation.enabled,
+        (!ocr_hotkey.is_empty()).then_some(ocr_hotkey),
+    )
+    .map_err(|e| e.to_string())?;
+    let separator = PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?;
     let settings = MenuItem::with_id(app, "settings", settings_label, true, None::<&str>)
         .map_err(|e| e.to_string())?;
     let restart_admin = MenuItem::with_id(
         app,
         "restart_admin",
         restart_admin_label,
-        true,
+        cfg!(target_os = "windows"),
         None::<&str>,
     )
     .map_err(|e| e.to_string())?;
     let quit = MenuItem::with_id(app, "quit", quit_label, true, None::<&str>)
         .map_err(|e| e.to_string())?;
-    Menu::with_items(app, &[&show, &settings, &restart_admin, &quit]).map_err(|e| e.to_string())
+    Menu::with_items(
+        app,
+        &[
+            &translate,
+            &lens,
+            &ocr,
+            &separator,
+            &restart_admin,
+            &settings,
+            &quit,
+        ],
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// 设置系统托盘图标和菜单
@@ -3423,14 +3484,9 @@ fn build_tray_menu(app: &AppHandle, lang: &str) -> Result<tauri::menu::Menu<taur
 fn setup_tray(app: &AppHandle) -> Result<(), String> {
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
-    let lang = app
-        .state::<AppState>()
-        .settings_read()
-        .settings_language
-        .clone()
-        .unwrap_or_else(|| "zh".to_string());
+    let settings = app.state::<AppState>().settings_read().clone();
 
-    let menu = build_tray_menu(app, &lang)?;
+    let menu = build_tray_menu(app, &settings)?;
 
     if let Some(tray) = app.tray_by_id("main") {
         tray.set_menu(Some(menu)).map_err(|e| e.to_string())?;
@@ -3472,14 +3528,25 @@ fn setup_tray(app: &AppHandle) -> Result<(), String> {
             _ => {}
         })
         .on_menu_event(|app, event| match event.id().as_ref() {
-            "show" => match ensure_main_window(app) {
-                Ok(window) => {
-                    let _ = window.set_always_on_top(true);
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
-                Err(err) => eprintln!("Failed to ensure main window: {}", err),
-            },
+            "translator" => {
+                toggle_main_window(app);
+            }
+            "lens" => {
+                let handle = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(err) = lens_request(handle) {
+                        eprintln!("Failed to open lens from tray menu: {err}");
+                    }
+                });
+            }
+            "ocr" => {
+                let handle = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(err) = lens_request_translate(handle) {
+                        eprintln!("Failed to open OCR from tray menu: {err}");
+                    }
+                });
+            }
             "settings" => {
                 if let Err(err) = open_settings_window(app) {
                     eprintln!("Failed to open settings window: {}", err);

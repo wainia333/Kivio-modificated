@@ -277,6 +277,10 @@ pub struct ScreenshotTranslationConfig {
     /// Apple Intelligence 选作 provider 时强制视为 true（Foundation Models 暂未开放图像输入）。
     #[serde(default = "default_false")]
     pub use_system_ocr: bool,
+    /// AI OCR 阶段提示词。为空时使用 DEFAULT_SCREENSHOT_OCR_PROMPT。
+    #[serde(default)]
+    pub ocr_prompt: Option<String>,
+    /// AI 翻译阶段提示词。为空时使用 DEFAULT_SCREENSHOT_TRANSLATION_TEMPLATE。
     #[serde(default)]
     pub prompt: Option<String>,
     // 旧版字段，用于迁移
@@ -304,6 +308,7 @@ impl Default for ScreenshotTranslationConfig {
             stream_enabled: true,
             keep_fullscreen_after_capture: true,
             use_system_ocr: false,
+            ocr_prompt: None,
             prompt: None,
             openai: None,
         }
@@ -835,6 +840,8 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
 
     // 规范化提示词（去除首尾空白，空值转为 None）
     settings.translator_prompt = normalize_optional_prompt(settings.translator_prompt.take());
+    settings.screenshot_translation.ocr_prompt =
+        normalize_optional_prompt(settings.screenshot_translation.ocr_prompt.take());
     settings.screenshot_translation.prompt =
         normalize_optional_prompt(settings.screenshot_translation.prompt.take());
 
