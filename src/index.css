@@ -295,6 +295,31 @@ body {
   margin-bottom: 0;
 }
 
+.lens-readable-text :where(table) {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+
+.lens-readable-text :where(th, td) {
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  padding: 0.32em 0.55em;
+}
+
+.dark .lens-readable-text :where(th, td) {
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.lens-readable-text :where(th) {
+  background: rgba(0, 0, 0, 0.025);
+  font-weight: 600;
+}
+
+.dark .lens-readable-text :where(th) {
+  background: rgba(255, 255, 255, 0.04);
+}
+
 .ocr-editable {
   min-height: 1.48em;
   max-height: none;

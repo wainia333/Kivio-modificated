@@ -2212,16 +2212,74 @@ pub async fn call_microsoft_translate(
         .map(|chunk| serde_json::json!({ "Text": chunk }))
         .collect::<Vec<_>>();
     let signature = microsoft_translate_signature(&url_path);
-    let response = send_with_retry("Microsoft Translate", retry_attempts, || {
-        state
-            .http
-            .post(url.clone())
-            .header("X-MT-Signature", signature.clone())
-            .header("User-Agent", "okhttp/4.5.0")
-            .json(&body)
-            .send()
-    })
-    .await?;
+    let attempts = retry_attempts.max(1);
+    let mut last_error: Option<String> = None;
+    let response = {
+        let mut response = None;
+        for attempt in 1..=attempts {
+            match state
+                .http
+                .post(url.clone())
+                .header("X-MT-Signature", signature.clone())
+                .header("User-Agent", "okhttp/4.5.0")
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(resp) => {
+                    let status = resp.status();
+                    if status.is_success() {
+                        response = Some(resp);
+                        break;
+                    }
+
+                    let retry_after = parse_retry_after(resp.headers());
+                    let text = resp.text().await.unwrap_or_default();
+                    if status == StatusCode::TOO_MANY_REQUESTS {
+                        eprintln!("Microsoft Translate rate limited: {text}");
+                        return Err(
+                            "Microsoft 翻译接口限流，请稍后重试或切换翻译接口。".to_string()
+                        );
+                    }
+
+                    let err_msg = format!("Microsoft Translate Error: {} - {}", status, text);
+                    if is_retryable_status(status) && attempt < attempts {
+                        last_error = Some(err_msg);
+                        let delay = retry_delay_ms(attempt, retry_after);
+                        eprintln!(
+                            "Microsoft Translate retrying in {}ms (attempt {}/{})",
+                            delay, attempt, attempts
+                        );
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
+                        continue;
+                    }
+
+                    return Err(format!("{} (attempt {}/{})", err_msg, attempt, attempts));
+                }
+                Err(err) => {
+                    let err_msg = format!("Microsoft Translate Error: {}", err);
+                    if is_retryable_error(&err) && attempt < attempts {
+                        last_error = Some(err_msg);
+                        let delay = retry_delay_ms(attempt, None);
+                        eprintln!(
+                            "Microsoft Translate retrying in {}ms (attempt {}/{})",
+                            delay, attempt, attempts
+                        );
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
+                        continue;
+                    }
+                    return Err(format!("{} (attempt {}/{})", err_msg, attempt, attempts));
+                }
+            }
+        }
+        response.ok_or_else(|| {
+            last_error
+                .map(|msg| format!("{} (attempt {}/{})", msg, attempts, attempts))
+                .unwrap_or_else(|| {
+                    format!("Microsoft Translate Error: exceeded retry attempts ({attempts})")
+                })
+        })?
+    };
     let raw = response
         .text()
         .await
@@ -2237,6 +2295,9 @@ pub async fn call_microsoft_translate(
             .get("code")
             .map(|v| v.to_string())
             .unwrap_or_else(|| "unknown".to_string());
+        if code.trim_matches('"').starts_with("429") {
+            return Err("Microsoft 翻译接口限流，请稍后重试或切换翻译接口。".to_string());
+        }
         let message = error
             .get("message")
             .and_then(|v| v.as_str())

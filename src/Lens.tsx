@@ -4,6 +4,7 @@ import { Loader2, Copy, Check, Square, Image as ImageIcon, ArrowUp, History as H
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { api, type LensStreamPayload, type LensTranslateStreamPayload, type LensWindowInfo, type ExplainMessage, type Settings } from './api/tauri'
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import 'katex/dist/katex.min.css'
@@ -13,6 +14,7 @@ import { copyToClipboard } from './utils/clipboard'
 type Stage = 'select' | 'ready' | 'answering' | 'translating' | 'translated'
 type Mode = 'chat' | 'translate'
 type SpeechTarget = 'original' | 'translated'
+type ScreenshotOcrMethod = NonNullable<Settings['screenshotTranslation']['ocrMethod']>
 
 /** 解析 webview hash query：'#lens?mode=translate' → 'translate' */
 function readModeFromHash(): Mode {
@@ -26,6 +28,11 @@ function readModeFromHash(): Mode {
 
 function resolveLensModelLabel(settings: Settings): string {
   return settings.lens?.model?.trim() || settings.translatorModel?.trim() || 'AI'
+}
+
+function resolveScreenshotOcrMethod(settings: Settings): ScreenshotOcrMethod {
+  return settings.screenshotTranslation?.ocrMethod
+    || (settings.screenshotTranslation?.useSystemOcr ? 'system' : 'ai')
 }
 
 function formatLensAsking(template: string, model: string): string {
@@ -150,33 +157,6 @@ function readEditableOcrText(root: HTMLElement): string {
   return blocks.join('\n\n').replace(/\n{3,}/g, '\n\n').trimEnd()
 }
 
-function readableBlocks(value: string): string[] {
-  const normalized = normalizeEnglishPunctuationSpacing(value).replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim()
-  if (!normalized) return []
-  return normalized
-    .split(/\n{2,}/)
-    .map(block => block.trim())
-    .filter(Boolean)
-}
-
-function translatedReadableBlocks(value: string, sourceText: string): string[] {
-  const blocks = readableBlocks(value)
-  if (blocks.length > 1) return blocks
-
-  const sourceBlocks = readableBlocks(sourceText)
-  const lines = value
-    .replace(/\r\n/g, '\n')
-    .replace(/\r/g, '\n')
-    .split('\n')
-    .map(line => line.trim())
-    .filter(Boolean)
-
-  if (sourceBlocks.length > 1 && lines.length >= sourceBlocks.length) {
-    return lines
-  }
-  return blocks.length ? blocks : lines
-}
-
 function splitSpeechText(value: string): string[] {
   const maxChars = 450
   const normalized = value
@@ -225,23 +205,23 @@ function splitSpeechText(value: string): string[] {
   return chunks.filter(Boolean)
 }
 
-function ReadableMarkdownText({
-  text,
-  sourceText = '',
-}: {
-  text: string
-  sourceText?: string
-}) {
-  const blocks = translatedReadableBlocks(text, sourceText)
+function ReadableMarkdownText({ text }: { text: string }) {
+  const normalized = normalizeEnglishPunctuationSpacing(text).replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim()
   return (
     <div className={`lens-readable-text ${readableParagraphGapClass(text)} prose prose-sm dark:prose-invert max-w-none text-[13px] leading-[1.48] text-neutral-800 dark:text-neutral-200`}>
-      {blocks.map((block, idx) => (
-        <div key={`${idx}-${block.slice(0, 16)}`} className="translated-readable-block">
-          <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
-            {block}
-          </ReactMarkdown>
-        </div>
-      ))}
+      <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
+        {normalized}
+      </ReactMarkdown>
+    </div>
+  )
+}
+
+function ReadonlyOcrMarkdownText({ text }: { text: string }) {
+  return (
+    <div className={`ocr-markdown lens-readable-text ${readableParagraphGapClass(text)} prose prose-sm dark:prose-invert max-w-none text-[13px] leading-[1.48] text-neutral-800 dark:text-neutral-200 select-text`}>
+      <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
+        {text}
+      </ReactMarkdown>
     </div>
   )
 }
@@ -256,24 +236,31 @@ function EditableOcrText({
   const rootRef = useRef<HTMLDivElement>(null)
   const lastEmittedRef = useRef(value)
   const composingRef = useRef(false)
+  const userEditedRef = useRef(false)
+  const suppressInputRef = useRef(false)
 
   useLayoutEffect(() => {
     const root = rootRef.current
     if (!root) return
     if (value === lastEmittedRef.current) return
+    suppressInputRef.current = true
     root.innerHTML = editableOcrHtml(value)
     lastEmittedRef.current = readEditableOcrText(root)
+    queueMicrotask(() => { suppressInputRef.current = false })
   }, [value])
 
   useLayoutEffect(() => {
     const root = rootRef.current
     if (!root) return
+    suppressInputRef.current = true
     root.innerHTML = editableOcrHtml(value)
-    lastEmittedRef.current = value
+    lastEmittedRef.current = readEditableOcrText(root)
+    queueMicrotask(() => { suppressInputRef.current = false })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const emit = useCallback(() => {
+    if (suppressInputRef.current) return
     if (composingRef.current) return
     const root = rootRef.current
     if (!root) return
@@ -283,10 +270,22 @@ function EditableOcrText({
     onChange(next)
   }, [onChange])
 
+  const handleInput = useCallback(() => {
+    userEditedRef.current = true
+    emit()
+  }, [emit])
+
+  const handleBlur = useCallback(() => {
+    if (!userEditedRef.current) return
+    emit()
+    userEditedRef.current = false
+  }, [emit])
+
   const handlePaste = useCallback((e: ClipboardEvent<HTMLDivElement>) => {
     const text = e.clipboardData.getData('text/plain')
     if (!text) return
     e.preventDefault()
+    userEditedRef.current = true
     document.execCommand('insertText', false, text)
     requestAnimationFrame(emit)
   }, [emit])
@@ -297,12 +296,13 @@ function EditableOcrText({
       contentEditable
       suppressContentEditableWarning
       spellCheck={false}
-      onInput={emit}
-      onBlur={emit}
+      onInput={handleInput}
+      onBlur={handleBlur}
       onPaste={handlePaste}
       onCompositionStart={() => { composingRef.current = true }}
       onCompositionEnd={() => {
         composingRef.current = false
+        userEditedRef.current = true
         emit()
       }}
       className={`ocr-editable lens-readable-text ${readableParagraphGapClass(value)} prose prose-sm dark:prose-invert max-w-none text-[13px] leading-[1.48] text-neutral-800 dark:text-neutral-200 custom-scrollbar`}
@@ -840,6 +840,7 @@ export default function Lens() {
   const [showTranslateOriginal, setShowTranslateOriginal] = useState(true)
   const [translateRetranslating, setTranslateRetranslating] = useState(false)
   const [translateCardHeight, setTranslateCardHeight] = useState<number | null>(null)
+  const [translateOcrMethod, setTranslateOcrMethod] = useState<ScreenshotOcrMethod>('ai')
   const [translateNow, setTranslateNow] = useState(() => Date.now())
   const translateStartRef = useRef<number | null>(null)
   const translateEditDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -977,6 +978,7 @@ export default function Lens() {
         setKeepFullscreen(cfg?.keepFullscreenAfterCapture !== false)
         if (curMode === 'translate') {
           setShowTranslateOriginal(!(settings.screenshotTranslation?.directTranslate ?? false))
+          setTranslateOcrMethod(resolveScreenshotOcrMethod(settings))
         }
       } catch (err) { console.error('Failed to load settings', err) }
     })()
@@ -1058,6 +1060,7 @@ export default function Lens() {
       setKeepFullscreen(cfg?.keepFullscreenAfterCapture !== false)
       if (curMode === 'translate') {
         setShowTranslateOriginal(!(settings.screenshotTranslation?.directTranslate ?? false))
+        setTranslateOcrMethod(resolveScreenshotOcrMethod(settings))
       }
     } catch (err) { console.error('Failed to reload settings', err) }
     // 防御：reset 流程会 setMessages([]) + setStreaming(false)，理论上 messages.length===0 effect 不会进
@@ -1802,10 +1805,10 @@ export default function Lens() {
     setTranslateText('')
     setTranslateError('')
     setTranslateDurationMs(null)
-    setTranslateRetranslating(true)
-    translateStartRef.current = Date.now()
+    setTranslateRetranslating(!!normalizedValue.trim())
+    translateStartRef.current = normalizedValue.trim() ? Date.now() : null
     setTranslateNow(Date.now())
-    setStage('translating')
+    setStage(normalizedValue.trim() ? 'translating' : 'translated')
   }, [translateOriginal])
 
   useEffect(() => {
@@ -1832,10 +1835,12 @@ export default function Lens() {
     }
 
     const seq = ++translateEditSeqRef.current
-    setTranslateRetranslating(true)
     const timer = window.setTimeout(() => {
       translateEditDebounceRef.current = null
-      translateStartRef.current = Date.now()
+      if (seq !== translateEditSeqRef.current) return
+      if (translateStartRef.current === null) {
+        translateStartRef.current = Date.now()
+      }
       setTranslateNow(Date.now())
       void (async () => {
         try {
@@ -1865,7 +1870,7 @@ export default function Lens() {
           }
         }
       })()
-    }, 800)
+    }, 900)
     translateEditDebounceRef.current = timer
 
     return () => {
@@ -2284,6 +2289,7 @@ export default function Lens() {
   const hideSelectBar = mode === 'chat' && stage === 'select' && selectBarCollapsed
   // translate 浮动卡片：截图后在选区旁出现，加载/完成两态
   const showTranslateCard = mode === 'translate' && (stage === 'translating' || stage === 'translated')
+  const readonlyAiOcrOriginal = translateOcrMethod === 'ai'
   // 浮动布局生效条件：原生窗口已经真的缩成浮动模式。
   // 没截图就直接提问的场景下，window 还是全屏 overlay、bar 还在底部居中，此时仍按全屏布局走。
   const isFloatingLayout = floatingRebased && capturedFrame !== null && stage !== 'select'
@@ -2314,6 +2320,7 @@ export default function Lens() {
     stableAnswerHeight,
     translateError,
     translateOriginal,
+    translateOcrMethod,
     translateRetranslating,
     translateText,
   ])
@@ -3184,7 +3191,7 @@ export default function Lens() {
                             />
                           )}
                           {m.content ? (
-                            <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
+                            <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
                               {m.content}
                             </ReactMarkdown>
                           ) : isLast && streaming && !m.reasoning ? (
@@ -3282,30 +3289,26 @@ export default function Lens() {
                 ? stableAnswerHeight
                 : Math.min(viewport.h - 110, stableAnswerHeight)
             }}>
-            {translateError ? (
-              <div className="text-[12.5px] text-red-500 leading-6 whitespace-pre-wrap break-words">
-                {t.lensError}: {translateError}
-              </div>
-            ) : (
-              <>
-                {/* OCR 结果：后端 OCR 完成后立即 emit original，先于翻译完成显示在上方。 */}
-                {showTranslateOriginal && (
-                  <div>
-                    <div className="mb-1.5 flex items-center gap-1.5">
-                      <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-neutral-400 dark:text-neutral-500">
-                        {t.shotOriginal}
-                      </span>
-                      {translateOriginal && (
-                        <>
-                          <button
-                            type="button"
-                            onClick={() => void copyTextWithFeedback(translateOriginal, 'original')}
-                            title={copiedTarget === 'original' ? t.lensCopied : t.lensCopy}
-                            aria-label={copiedTarget === 'original' ? t.lensCopied : t.lensCopy}
-                            className="shrink-0 w-5 h-5 rounded-md flex items-center justify-center text-neutral-400 hover:text-neutral-700 dark:text-neutral-500 dark:hover:text-neutral-100 hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors"
-                          >
-                            {copiedTarget === 'original' ? <Check size={12} /> : <Copy size={12} />}
-                          </button>
+            <>
+              {/* OCR 结果：后端 OCR 完成后立即 emit original，先于翻译完成显示在上方。 */}
+              {showTranslateOriginal && (
+                <div>
+                  <div className="mb-1.5 flex items-center gap-1.5">
+                    <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-neutral-400 dark:text-neutral-500">
+                      {t.shotOriginal}
+                    </span>
+                    {translateOriginal && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => void copyTextWithFeedback(translateOriginal, 'original')}
+                          title={copiedTarget === 'original' ? t.lensCopied : t.lensCopy}
+                          aria-label={copiedTarget === 'original' ? t.lensCopied : t.lensCopy}
+                          className="shrink-0 w-5 h-5 rounded-md flex items-center justify-center text-neutral-400 hover:text-neutral-700 dark:text-neutral-500 dark:hover:text-neutral-100 hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors"
+                        >
+                          {copiedTarget === 'original' ? <Check size={12} /> : <Copy size={12} />}
+                        </button>
+                        {!readonlyAiOcrOriginal && (
                           <button
                             type="button"
                             onClick={() => void speakText(translateOriginal, 'original')}
@@ -3321,78 +3324,92 @@ export default function Lens() {
                               ? <Loader2 size={12} className="animate-spin" />
                               : <Play size={12} fill="currentColor" strokeWidth={0} />}
                           </button>
-                        </>
-                      )}
-                    </div>
-                    {translateOriginal ? (
-                      <EditableOcrText
-                        value={translateOriginal}
-                        onChange={handleTranslateOriginalChange}
-                      />
-                    ) : (
-                      <div className="space-y-2">
-                        <div className="h-3.5 rounded bg-gradient-to-r from-neutral-200 via-neutral-100 to-neutral-200 dark:from-neutral-800 dark:via-neutral-700 dark:to-neutral-800 bg-[length:200%_100%] animate-[shimmer_1.4s_linear_infinite]" />
-                        <div className="h-3.5 rounded bg-gradient-to-r from-neutral-200 via-neutral-100 to-neutral-200 dark:from-neutral-800 dark:via-neutral-700 dark:to-neutral-800 bg-[length:200%_100%] animate-[shimmer_1.4s_linear_infinite] w-[82%]" />
-                      </div>
+                        )}
+                      </>
                     )}
                   </div>
-                )}
-
-                {showTranslateOriginal && (
-                  <div className="border-t border-black/[0.05] dark:border-white/[0.06] -mx-3.5 my-3" />
-                )}
-
-                {/* 翻译结果：位于 OCR 下方，流式翻译时继续逐段追加。 */}
-                <div className="mb-1.5 flex items-center gap-1.5">
-                  <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-neutral-400 dark:text-neutral-500">
-                    {t.shotTranslated}
-                  </span>
-                  {translateRetranslating && (
-                    <span className="flex items-center gap-1 text-[10.5px] text-neutral-400 dark:text-neutral-500">
-                      <Loader2 size={10} className="animate-spin" />
-                      {t.shotTranslating}
-                    </span>
-                  )}
-                  {translateText && (
-                    <>
-                      <button
-                        type="button"
-                        onClick={() => void copyTextWithFeedback(translateText, 'translated')}
-                        title={copiedTarget === 'translated' ? t.lensCopied : t.lensCopy}
-                        aria-label={copiedTarget === 'translated' ? t.lensCopied : t.lensCopy}
-                        className="shrink-0 w-5 h-5 rounded-md flex items-center justify-center text-neutral-400 hover:text-neutral-700 dark:text-neutral-500 dark:hover:text-neutral-100 hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors"
-                      >
-                        {copiedTarget === 'translated' ? <Check size={12} /> : <Copy size={12} />}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void speakText(translateText, 'translated')}
-                        title={speakingTarget === 'translated' ? t.lensStop : t.lensSpeak}
-                        aria-label={speakingTarget === 'translated' ? t.lensStop : t.lensSpeak}
-                        className={`shrink-0 w-5 h-5 rounded-md flex items-center justify-center hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors ${
-                          speakingTarget === 'translated'
-                            ? 'text-neutral-700 dark:text-neutral-100'
-                            : 'text-neutral-400 hover:text-neutral-700 dark:text-neutral-500 dark:hover:text-neutral-100'
-                        }`}
-                      >
-                        {speechLoadingTarget === 'translated'
-                          ? <Loader2 size={12} className="animate-spin" />
-                          : <Play size={12} fill="currentColor" strokeWidth={0} />}
-                      </button>
-                    </>
+                  {translateOriginal || translateOriginalEditedRef.current ? readonlyAiOcrOriginal ? (
+                    <ReadonlyOcrMarkdownText text={translateOriginal} />
+                  ) : (
+                    <EditableOcrText
+                      value={translateOriginal}
+                      onChange={handleTranslateOriginalChange}
+                    />
+                  ) : (
+                    <div className="space-y-2">
+                      <div className="h-3.5 rounded bg-gradient-to-r from-neutral-200 via-neutral-100 to-neutral-200 dark:from-neutral-800 dark:via-neutral-700 dark:to-neutral-800 bg-[length:200%_100%] animate-[shimmer_1.4s_linear_infinite]" />
+                      <div className="h-3.5 rounded bg-gradient-to-r from-neutral-200 via-neutral-100 to-neutral-200 dark:from-neutral-800 dark:via-neutral-700 dark:to-neutral-800 bg-[length:200%_100%] animate-[shimmer_1.4s_linear_infinite] w-[82%]" />
+                    </div>
                   )}
                 </div>
-                {translateText ? (
-                  <ReadableMarkdownText text={translateText} sourceText={translateOriginal} />
-                ) : (
-                  <div className="space-y-2">
-                    <div className="h-3.5 rounded bg-gradient-to-r from-neutral-200 via-neutral-100 to-neutral-200 dark:from-neutral-800 dark:via-neutral-700 dark:to-neutral-800 bg-[length:200%_100%] animate-[shimmer_1.4s_linear_infinite]" />
-                    <div className="h-3.5 rounded bg-gradient-to-r from-neutral-200 via-neutral-100 to-neutral-200 dark:from-neutral-800 dark:via-neutral-700 dark:to-neutral-800 bg-[length:200%_100%] animate-[shimmer_1.4s_linear_infinite] w-[88%]" />
-                    <div className="h-3.5 rounded bg-gradient-to-r from-neutral-200 via-neutral-100 to-neutral-200 dark:from-neutral-800 dark:via-neutral-700 dark:to-neutral-800 bg-[length:200%_100%] animate-[shimmer_1.4s_linear_infinite] w-[72%]" />
-                  </div>
+              )}
+
+              {showTranslateOriginal && (
+                <div className="border-t border-black/[0.05] dark:border-white/[0.06] -mx-3.5 my-3" />
+              )}
+
+              {/* 翻译结果：位于 OCR 下方，流式翻译时继续逐段追加；翻译报错只显示在这里，不覆盖 OCR 结果。 */}
+              <div className="mb-1.5 flex items-center gap-1.5">
+                <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-neutral-400 dark:text-neutral-500">
+                  {t.shotTranslated}
+                </span>
+                {translateRetranslating && (
+                  <span className="flex items-center gap-1 text-[10.5px] text-neutral-400 dark:text-neutral-500">
+                    <Loader2 size={10} className="animate-spin" />
+                    {t.shotTranslating}
+                  </span>
                 )}
-              </>
-            )}
+                {translateText && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => void copyTextWithFeedback(translateText, 'translated')}
+                      title={copiedTarget === 'translated' ? t.lensCopied : t.lensCopy}
+                      aria-label={copiedTarget === 'translated' ? t.lensCopied : t.lensCopy}
+                      className="shrink-0 w-5 h-5 rounded-md flex items-center justify-center text-neutral-400 hover:text-neutral-700 dark:text-neutral-500 dark:hover:text-neutral-100 hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors"
+                    >
+                      {copiedTarget === 'translated' ? <Check size={12} /> : <Copy size={12} />}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void speakText(translateText, 'translated')}
+                      title={speakingTarget === 'translated' ? t.lensStop : t.lensSpeak}
+                      aria-label={speakingTarget === 'translated' ? t.lensStop : t.lensSpeak}
+                      className={`shrink-0 w-5 h-5 rounded-md flex items-center justify-center hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors ${
+                        speakingTarget === 'translated'
+                          ? 'text-neutral-700 dark:text-neutral-100'
+                          : 'text-neutral-400 hover:text-neutral-700 dark:text-neutral-500 dark:hover:text-neutral-100'
+                      }`}
+                    >
+                      {speechLoadingTarget === 'translated'
+                        ? <Loader2 size={12} className="animate-spin" />
+                        : <Play size={12} fill="currentColor" strokeWidth={0} />}
+                    </button>
+                  </>
+                )}
+              </div>
+              {translateText && (
+                readonlyAiOcrOriginal ? (
+                  <ReadableMarkdownText text={translateText} />
+                ) : (
+                  <div className="lens-readable-text text-[13px] leading-[1.48] text-neutral-800 dark:text-neutral-200 whitespace-pre-wrap break-words select-text">
+                    {translateText}
+                  </div>
+                )
+              )}
+              {translateError && (
+                <div className="mt-2 text-[12.5px] text-red-500 leading-6 whitespace-pre-wrap break-words">
+                  {t.lensError}: {translateError}
+                </div>
+              )}
+              {!translateText && !translateError && (!translateOriginalEditedRef.current || translateRetranslating) && (
+                <div className="space-y-2">
+                  <div className="h-3.5 rounded bg-gradient-to-r from-neutral-200 via-neutral-100 to-neutral-200 dark:from-neutral-800 dark:via-neutral-700 dark:to-neutral-800 bg-[length:200%_100%] animate-[shimmer_1.4s_linear_infinite]" />
+                  <div className="h-3.5 rounded bg-gradient-to-r from-neutral-200 via-neutral-100 to-neutral-200 dark:from-neutral-800 dark:via-neutral-700 dark:to-neutral-800 bg-[length:200%_100%] animate-[shimmer_1.4s_linear_infinite] w-[88%]" />
+                  <div className="h-3.5 rounded bg-gradient-to-r from-neutral-200 via-neutral-100 to-neutral-200 dark:from-neutral-800 dark:via-neutral-700 dark:to-neutral-800 bg-[length:200%_100%] animate-[shimmer_1.4s_linear_infinite] w-[72%]" />
+                </div>
+              )}
+            </>
           </div>
         </div>
       )}
