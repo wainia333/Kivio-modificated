@@ -1642,34 +1642,60 @@ export default function Lens() {
     const targetStage = target.stage
 
     if (!keepFullscreen) {
-      // 为避免透明 Tauri 窗口从全屏缩成小浮窗时重建/重排闪烁，这里不再立即切原生浮动窗口。
-      // 视觉上仍然是浮窗飞到截图旁边；载体窗口保持全屏透明，拖动用前端坐标完成。
       fullscreenMetricsRef.current = metrics
-      const nextBarRect = { x: Math.round(targetX), y: Math.round(targetY), width: READY_W }
-      const fromBarRect = barRect
       if (floatingRebaseTimerRef.current) clearTimeout(floatingRebaseTimerRef.current)
+      const width = Math.round(READY_W)
+      const height = Math.round(target.height)
+      const targetOrigin = { x: Math.round(target.windowX), y: Math.round(target.windowY) }
+
       flushSync(() => {
         setAppLabel(label)
         setFloatingRebased(false)
         floatingSizeRef.current = null
         setBarNoTransition(true)
-        setBarRebaseHidden(false)
-        setBarInFlight(true)
+        setBarRebaseHidden(true)
+        setBarInFlight(false)
         setSelectBarCollapsed(false)
-        setBarFlyOffset({
-          x: Math.round(fromBarRect.x - nextBarRect.x),
-          y: Math.round(fromBarRect.y - nextBarRect.y),
+        setBarFlyOffset({ x: 0, y: 0 })
+        setBarRect({
+          x: Math.round(targetX),
+          y: Math.round(targetY),
+          width,
         })
-        setBarRect(nextBarRect)
         setStage(targetStage)
       })
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          setBarNoTransition(false)
-          setBarFlyOffset({ x: 0, y: 0 })
-          markBarFlight()
+
+      try {
+        await api.lensSetFloating({
+          x: targetOrigin.x,
+          y: targetOrigin.y,
+          width,
+          height,
+          hitRegion: { x: 0, y: 0, width, height },
         })
-      })
+        flushSync(() => {
+          setFloatingRebased(true)
+          setNativeHitRegionActive(false)
+          setHitRegionRect(null)
+          setWinOrigin(targetOrigin)
+          setViewport({ w: width, h: height })
+          setBarRect({ x: 0, y: 0, width })
+          setBarRebaseHidden(false)
+          floatingSizeRef.current = { width, height }
+        })
+        requestAnimationFrame(() => setBarNoTransition(false))
+      } catch (err) {
+        console.error('[lens-floating] native floating failed:', err)
+        flushSync(() => {
+          setFloatingRebased(false)
+          setBarRebaseHidden(false)
+        })
+      }
+
+      if (mode === 'chat') {
+        focusLensInput([30, 120, 260])
+      }
+      return
     } else {
       const nextBarRect = { x: Math.round(targetX), y: Math.round(targetY), width: READY_W }
       const fromBarRect = barRect
@@ -2282,8 +2308,7 @@ export default function Lens() {
     }
   }, [barRect.y, isFloatingLayout, viewport.h])
 
-  // 截图后为了避免原生窗口缩放闪烁，Lens 仍由一个全屏透明窗口承载。
-  // 此时必须让悬浮窗之外的区域鼠标穿透，否则透明窗口会挡住桌面。
+  // keepFullscreen=false 时会切换成真正的原生小悬浮窗；这里只服务 keepFullscreen=true 的覆盖层模式。
   const passThroughOverlay = capturedFrame !== null && stage !== 'select' && !floatingRebased && !barRebaseHidden
   const passThroughPanelRect = useMemo<Rect | null>(() => {
     if (!passThroughOverlay) return null
@@ -2441,10 +2466,14 @@ export default function Lens() {
 
   const activePassThroughRect = useMemo<Rect | null>(() => {
     if (!passThroughOverlay) return null
-    const rects = [hitRegionRect, passThroughPanelRect].filter((rect): rect is Rect => rect !== null)
+    const rects = (barInFlight
+      ? [hitRegionRect, passThroughPanelRect]
+      : [hitRegionRect || passThroughPanelRect]
+    ).filter((rect): rect is Rect => rect !== null)
     const union = unionRects(rects)
     return union ? clampRect(union, viewport) : null
   }, [
+    barInFlight,
     hitRegionRect,
     passThroughOverlay,
     passThroughPanelRect,
@@ -2602,13 +2631,22 @@ export default function Lens() {
       return
     }
 
-    const startPoint = { x: e.clientX, y: e.clientY }
-    const startRect = barRect
     panelDraggingRef.current = true
     setLensCursorPassthrough(false)
 
     setBarNoTransition(true)
     setBarFlyOffset({ x: 0, y: 0 })
+
+    const startPoint = { x: e.clientX, y: e.clientY }
+    const startRect = barRect
+
+    const stopDrag = () => {
+      if (!panelDraggingRef.current) return
+      window.removeEventListener('mousemove', onMove, true)
+      window.removeEventListener('mouseup', onUp, true)
+      panelDraggingRef.current = false
+      requestAnimationFrame(() => setBarNoTransition(false))
+    }
 
     const onMove = (ev: MouseEvent) => {
       ev.preventDefault()
@@ -2617,12 +2655,7 @@ export default function Lens() {
       setBarRect(prev => ({ ...prev, x: Math.round(nextX), y: Math.round(nextY) }))
     }
 
-    const onUp = () => {
-      window.removeEventListener('mousemove', onMove, true)
-      window.removeEventListener('mouseup', onUp, true)
-      panelDraggingRef.current = false
-      requestAnimationFrame(() => setBarNoTransition(false))
-    }
+    const onUp = () => stopDrag()
 
     window.addEventListener('mousemove', onMove, { capture: true, passive: false })
     window.addEventListener('mouseup', onUp, true)
