@@ -18,6 +18,7 @@ import {
 } from './settings/components'
 
 type SettingsData = SettingsType
+type TranslationMethod = NonNullable<SettingsData['screenshotTranslation']['translationMethod']>
 
 interface SettingsProps {
   onClose: () => void
@@ -64,6 +65,17 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
 
   const lang = settings?.settingsLanguage || 'zh'
   const t = i18n[lang]
+  const translationMethodOptions: { value: TranslationMethod; label: string }[] = [
+    { value: 'ai', label: t.screenshotTranslationAI },
+    { value: 'google', label: t.screenshotTranslationGoogle },
+    { value: 'baidu', label: t.screenshotTranslationBaidu },
+    { value: 'tencent', label: t.screenshotTranslationTencent },
+    { value: 'bing', label: t.screenshotTranslationBing },
+    { value: 'bing2', label: t.screenshotTranslationBing2 },
+    { value: 'yandex', label: t.screenshotTranslationYandex },
+    { value: 'caiyun2', label: t.screenshotTranslationCaiyun2 },
+    { value: 'microsoft', label: t.screenshotTranslationMicrosoft },
+  ]
   // 判断是否有未保存的更改
   const hasUnsavedChanges = settings ? JSON.stringify(settings) !== initialSettingsSnapshot : false
 
@@ -438,7 +450,7 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
       id: newId,
       name: 'New Provider',
       apiKeys: [],
-      baseUrl: 'https://api.openai.com/v1',
+      baseUrl: 'https://api.openai.com/v1/responses',
       availableModels: [],
       enabledModels: []
     }
@@ -492,6 +504,10 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
     const nextProviders = settings.providers.filter(p => p.id !== id)
     const translatorProvider = resolveProvider(nextProviders, settings.translatorProviderId)
     const screenshotProvider = resolveProvider(nextProviders, settings.screenshotTranslation?.providerId || '')
+    const screenshotHadOwnTranslateProvider = !!settings.screenshotTranslation?.translateProviderId
+    const screenshotTranslateProvider = screenshotHadOwnTranslateProvider
+      ? resolveProvider(nextProviders, settings.screenshotTranslation?.translateProviderId || '')
+      : undefined
     // lens providerId 为空表示 fallback 到 translator，删除时若已设置自身 provider 才需要级联
     const lensHadOwnProvider = !!settings.lens?.providerId
     const lensProvider = lensHadOwnProvider
@@ -506,7 +522,9 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
       screenshotTranslation: {
         ...settings.screenshotTranslation,
         providerId: screenshotProvider ? screenshotProvider.id : '',
-        model: resolveModel(screenshotProvider, settings.screenshotTranslation?.model || '')
+        model: resolveModel(screenshotProvider, settings.screenshotTranslation?.model || ''),
+        translateProviderId: screenshotHadOwnTranslateProvider ? (screenshotTranslateProvider ? screenshotTranslateProvider.id : '') : (settings.screenshotTranslation?.translateProviderId || ''),
+        translateModel: screenshotHadOwnTranslateProvider ? resolveModel(screenshotTranslateProvider, settings.screenshotTranslation?.translateModel || '') : (settings.screenshotTranslation?.translateModel || '')
       },
       ...(lensHadOwnProvider ? {
         lens: {
@@ -568,6 +586,13 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
         }
       }
 
+      if (prev.screenshotTranslation.translateProviderId === providerId) {
+        next.screenshotTranslation = {
+          ...next.screenshotTranslation,
+          translateModel: resolveAfterRemoval(prev.screenshotTranslation.translateModel || ''),
+        }
+      }
+
       if (prev.lens?.providerId === providerId) {
         next.lens = {
           ...prev.lens,
@@ -618,12 +643,43 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
         hotkey: 'CommandOrControl+Shift+A',
         providerId: 'default-ocr',
         model: 'gpt-4o',
+        ocrMethod: 'ai',
+        translationMethod: 'ai',
+        translateProviderId: '',
+        translateModel: '',
+        baiduOcr: {
+          apiKey: '',
+          secretKey: '',
+          languageType: 'CHN_ENG',
+          accurate: false,
+        },
+        baiduTranslate: {
+          appId: '',
+          appKey: '',
+          sourceLang: 'auto',
+        },
+        tencentTranslate: {
+          secretId: '',
+          secretKey: '',
+        },
+        caiyunTranslate: {
+          token: '',
+        },
         directTranslate: false,
         thinkingEnabled: false,
         streamEnabled: true,
         prompt: ''
       }
-      return { ...prev, screenshotTranslation: { ...current, ...updates } }
+      const nextScreenshotTranslation = { ...current, ...updates }
+      const syncAiTranslateModel = 'translateProviderId' in updates || 'translateModel' in updates
+      return {
+        ...prev,
+        ...(syncAiTranslateModel ? {
+          translatorProviderId: nextScreenshotTranslation.translateProviderId || nextScreenshotTranslation.providerId || prev.translatorProviderId,
+          translatorModel: nextScreenshotTranslation.translateModel || nextScreenshotTranslation.model || prev.translatorModel,
+        } : {}),
+        screenshotTranslation: nextScreenshotTranslation,
+      }
     })
   }, [])
 
@@ -658,6 +714,63 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
 
   // 当前语言对应的默认 lens 提示词
   const lensDefaults = defaultPrompts?.lensPrompts?.[settings?.lens?.defaultLanguage === 'en' ? 'en' : 'zh']
+  const modelPairOptions = settings?.providers.flatMap(p =>
+    p.enabledModels.map(m => ({
+      value: `${p.id}:${m}`,
+      label: `${p.name} - ${m}`
+    }))
+  ) || []
+  const screenshotOcrMethod = settings?.screenshotTranslation?.ocrMethod
+    || (settings?.screenshotTranslation?.useSystemOcr ? 'system' : 'ai')
+  const screenshotTranslationMethod = settings?.screenshotTranslation?.translationMethod || 'ai'
+  const screenshotAiOcrPair = settings?.screenshotTranslation
+    ? `${settings.screenshotTranslation.providerId}:${settings.screenshotTranslation.model}`
+    : ''
+  const screenshotAiTranslatePair = settings?.screenshotTranslation
+    ? `${settings.screenshotTranslation.translateProviderId || settings.screenshotTranslation.providerId}:${settings.screenshotTranslation.translateModel || settings.screenshotTranslation.model}`
+    : ''
+  const updateBaiduOcr = (updates: Partial<NonNullable<SettingsData['screenshotTranslation']['baiduOcr']>>) => {
+    updateScreenshotTranslation({
+      baiduOcr: {
+        apiKey: '',
+        secretKey: '',
+        languageType: 'CHN_ENG',
+        accurate: false,
+        ...(settings?.screenshotTranslation?.baiduOcr || {}),
+        ...updates,
+      },
+    })
+  }
+  const updateBaiduTranslate = (updates: Partial<NonNullable<SettingsData['screenshotTranslation']['baiduTranslate']>>) => {
+    updateScreenshotTranslation({
+      baiduTranslate: {
+        appId: '',
+        appKey: '',
+        sourceLang: 'auto',
+        ...(settings?.screenshotTranslation?.baiduTranslate || {}),
+        ...updates,
+      },
+    })
+  }
+  const updateTencentTranslate = (updates: Partial<NonNullable<SettingsData['screenshotTranslation']['tencentTranslate']>>) => {
+    updateScreenshotTranslation({
+      tencentTranslate: {
+        secretId: '',
+        secretKey: '',
+        ...(settings?.screenshotTranslation?.tencentTranslate || {}),
+        ...updates,
+      },
+    })
+  }
+  const updateCaiyunTranslate = (updates: Partial<NonNullable<SettingsData['screenshotTranslation']['caiyunTranslate']>>) => {
+    updateScreenshotTranslation({
+      caiyunTranslate: {
+        token: '',
+        ...(settings?.screenshotTranslation?.caiyunTranslate || {}),
+        ...updates,
+      },
+    })
+  }
 
   // 快捷键录制监听
   useEffect(() => {
@@ -814,22 +927,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
               </div>
             </section>
 
-            {/* 快捷键 */}
-            <section>
-              <SectionTitle icon={Keyboard}>{t.hotkey}</SectionTitle>
-              <div className="settings-card overflow-hidden px-4 py-3">
-                <HotkeyInput
-                  value={settings.hotkey}
-                  placeholder={t.hotkeyPlaceholder}
-                  recording={recordingTarget === 'main'}
-                  onToggleRecording={() => toggleRecording('main')}
-                  recordLabel={t.hotkeyRecord}
-                  recordingLabel={t.hotkeyRecording}
-                  recordingPlaceholder={t.hotkeyRecordingPlaceholder}
-                />
-              </div>
-            </section>
-
             {/* 行为 */}
             <section>
               <SectionTitle icon={SlidersHorizontal}>{lang === 'zh' ? '行为' : 'Behavior'}</SectionTitle>
@@ -957,6 +1054,22 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
         {/* ===== 翻译设置标签页 ===== */}
         {activeTab === 'translate' && (
           <div className="space-y-8 animate-in fade-in slide-in-from-bottom-2 duration-300">
+            {/* 快捷键 */}
+            <section>
+              <SectionTitle icon={Keyboard}>{t.hotkey}</SectionTitle>
+              <div className="settings-card overflow-hidden px-4 py-3">
+                <HotkeyInput
+                  value={settings.hotkey}
+                  placeholder={t.hotkeyPlaceholder}
+                  recording={recordingTarget === 'main'}
+                  onToggleRecording={() => toggleRecording('main')}
+                  recordLabel={t.hotkeyRecord}
+                  recordingLabel={t.hotkeyRecording}
+                  recordingPlaceholder={t.hotkeyRecordingPlaceholder}
+                />
+              </div>
+            </section>
+
             {/* 目标语言 */}
             <section>
               <SectionTitle icon={Globe}>{t.targetLang}</SectionTitle>
@@ -984,23 +1097,92 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
             {/* 翻译引擎 */}
             <section>
               <SectionTitle icon={Cpu}>{t.engine}</SectionTitle>
-              <div className="settings-card overflow-hidden">
-                <SettingRow label={t.selectModelPair}>
+              <div className="settings-card overflow-hidden divide-y divide-black/[0.04] dark:divide-white/[0.05]">
+                <SettingRow label={t.screenshotTranslationMethod}>
                   <Select
-                    className="w-52"
-                    value={`${settings.translatorProviderId}:${settings.translatorModel}`}
-                    onChange={(v) => {
-                      const [providerId, model] = v.split(':')
-                      updateSettings({ translatorProviderId: providerId, translatorModel: model })
-                    }}
-                    options={settings.providers.flatMap(p =>
-                      p.enabledModels.map(m => ({
-                        value: `${p.id}:${m}`,
-                        label: `${p.name} - ${m}`
-                      }))
-                    )}
+                    className="w-56"
+                    value={screenshotTranslationMethod}
+                    onChange={(v) => updateScreenshotTranslation({ translationMethod: v as TranslationMethod })}
+                    options={translationMethodOptions}
                   />
                 </SettingRow>
+
+                {screenshotTranslationMethod === 'ai' && (
+                  <SettingRow label={t.screenshotAiTranslateModel}>
+                    <Select
+                      className="w-60"
+                      value={screenshotAiTranslatePair}
+                      onChange={(v) => {
+                        const [translateProviderId, translateModel] = v.split(':')
+                        updateScreenshotTranslation({ translateProviderId, translateModel })
+                      }}
+                      options={modelPairOptions.length ? modelPairOptions : [{ value: screenshotAiTranslatePair, label: t.selectModelPair }]}
+                    />
+                  </SettingRow>
+                )}
+
+                {screenshotTranslationMethod === 'baidu' && (
+                  <>
+                    <div className="px-4 py-3 space-y-2.5">
+                      <Label>{t.baiduTranslateAppId}</Label>
+                      <Input
+                        value={settings.screenshotTranslation?.baiduTranslate?.appId || ''}
+                        onChange={(v) => updateBaiduTranslate({ appId: v })}
+                        type="password"
+                        placeholder={t.baiduTranslateAppId}
+                        mono
+                      />
+                    </div>
+                    <div className="px-4 py-3 space-y-2.5">
+                      <Label>{t.baiduTranslateAppKey}</Label>
+                      <Input
+                        value={settings.screenshotTranslation?.baiduTranslate?.appKey || ''}
+                        onChange={(v) => updateBaiduTranslate({ appKey: v })}
+                        type="password"
+                        placeholder={t.baiduTranslateAppKey}
+                        mono
+                      />
+                    </div>
+                  </>
+                )}
+
+                {screenshotTranslationMethod === 'tencent' && (
+                  <>
+                    <div className="px-4 py-3 space-y-2.5">
+                      <Label>{t.tencentTranslateSecretId}</Label>
+                      <Input
+                        value={settings.screenshotTranslation?.tencentTranslate?.secretId || ''}
+                        onChange={(v) => updateTencentTranslate({ secretId: v })}
+                        type="password"
+                        placeholder={t.tencentTranslateSecretId}
+                        mono
+                      />
+                    </div>
+                    <div className="px-4 py-3 space-y-2.5">
+                      <Label>{t.tencentTranslateSecretKey}</Label>
+                      <Input
+                        value={settings.screenshotTranslation?.tencentTranslate?.secretKey || ''}
+                        onChange={(v) => updateTencentTranslate({ secretKey: v })}
+                        type="password"
+                        placeholder={t.tencentTranslateSecretKey}
+                        mono
+                      />
+                    </div>
+                  </>
+                )}
+
+                {screenshotTranslationMethod === 'caiyun2' && (
+                  <div className="px-4 py-3 space-y-2.5">
+                    <Label>{t.caiyunTranslateToken}</Label>
+                    <Input
+                      value={settings.screenshotTranslation?.caiyunTranslate?.token || ''}
+                      onChange={(v) => updateCaiyunTranslate({ token: v })}
+                      type="password"
+                      placeholder={t.caiyunTranslateToken}
+                      mono
+                    />
+                  </div>
+                )}
               </div>
             </section>
 
@@ -1024,58 +1206,218 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
 
         {/* ===== 截图设置标签页 ===== */}
         {activeTab === 'screenshot' && (
-          <div className="space-y-8 animate-in fade-in slide-in-from-bottom-2 duration-300">
-            {/* 截图翻译设置 */}
+          <div className="space-y-7 animate-in fade-in slide-in-from-bottom-2 duration-300">
             <section>
-              <SectionTitle icon={Camera}>{t.screenshotTranslate}</SectionTitle>
-              <div className="settings-card overflow-hidden">
-                <div className="divide-y divide-black/[0.04] dark:divide-white/[0.05]">
-                  <SettingRow label={t.enabled}>
-                    <Toggle
-                      checked={settings.screenshotTranslation?.enabled ?? true}
-                      onChange={(v) => updateScreenshotTranslation({ enabled: v })}
-                    />
-                  </SettingRow>
+              <SectionTitle icon={Camera}>{t.screenshotBasics}</SectionTitle>
+              <div className="settings-card overflow-hidden divide-y divide-black/[0.04] dark:divide-white/[0.05]">
+                <SettingRow label={t.enabled}>
+                  <Toggle
+                    checked={settings.screenshotTranslation?.enabled ?? true}
+                    onChange={(v) => updateScreenshotTranslation({ enabled: v })}
+                  />
+                </SettingRow>
 
-                  {settings.screenshotTranslation?.enabled !== false && (
-                    <>
-                      <div className="px-4 py-3 space-y-1.5">
-                        <span className="text-[12px] font-medium text-neutral-700 dark:text-neutral-200">{t.hotkey}</span>
-                        <HotkeyInput
-                          value={settings.screenshotTranslation?.hotkey || 'CommandOrControl+Shift+A'}
-                          placeholder="CommandOrControl+Shift+A"
-                          recording={recordingTarget === 'screenshotTranslation'}
-                          onToggleRecording={() => toggleRecording('screenshotTranslation')}
-                          recordLabel={t.hotkeyRecord}
-                          recordingLabel={t.hotkeyRecording}
-                          recordingPlaceholder={t.hotkeyRecordingPlaceholder}
-                        />
-                      </div>
-                      <SettingRow label={t.selectModelPair}>
+                {settings.screenshotTranslation?.enabled !== false && (
+                  <div className="px-4 py-3 space-y-1.5">
+                    <span className="text-[12px] font-medium text-neutral-700 dark:text-neutral-200">{t.hotkey}</span>
+                    <HotkeyInput
+                      value={settings.screenshotTranslation?.hotkey || 'CommandOrControl+Shift+A'}
+                      placeholder="CommandOrControl+Shift+A"
+                      recording={recordingTarget === 'screenshotTranslation'}
+                      onToggleRecording={() => toggleRecording('screenshotTranslation')}
+                      recordLabel={t.hotkeyRecord}
+                      recordingLabel={t.hotkeyRecording}
+                      recordingPlaceholder={t.hotkeyRecordingPlaceholder}
+                    />
+                  </div>
+                )}
+              </div>
+            </section>
+
+            {settings.screenshotTranslation?.enabled !== false && (
+              <>
+                <section>
+                  <SectionTitle icon={FileText}>{t.screenshotOcrSection}</SectionTitle>
+                  <div className="settings-card overflow-hidden divide-y divide-black/[0.04] dark:divide-white/[0.05]">
+                    <SettingRow label={t.screenshotOcrMethod}>
+                      <Select
+                        className="w-56"
+                        value={screenshotOcrMethod}
+                        onChange={(v) => updateScreenshotTranslation({
+                          ocrMethod: v as 'ai' | 'baidu' | 'system',
+                          useSystemOcr: v === 'system',
+                        })}
+                        options={[
+                          { value: 'ai', label: t.screenshotOcrAI },
+                          { value: 'baidu', label: t.screenshotOcrBaidu },
+                          { value: 'system', label: t.screenshotOcrSystem },
+                        ]}
+                      />
+                    </SettingRow>
+
+                    {screenshotOcrMethod === 'ai' && (
+                      <SettingRow label={t.screenshotAiOcrModel}>
                         <Select
-                          className="w-52"
-                          value={`${settings.screenshotTranslation.providerId}:${settings.screenshotTranslation.model}`}
+                          className="w-60"
+                          value={screenshotAiOcrPair}
                           onChange={(v) => {
                             const [providerId, model] = v.split(':')
                             updateScreenshotTranslation({ providerId, model })
                           }}
-                          options={settings.providers.flatMap(p =>
-                            p.enabledModels.map(m => ({
-                              value: `${p.id}:${m}`,
-                              label: `${p.name} - ${m}`
-                            }))
-                          )}
+                          options={modelPairOptions.length ? modelPairOptions : [{ value: screenshotAiOcrPair, label: t.selectModelPair }]}
                         />
                       </SettingRow>
-                      <SettingRow
-                        label={t.screenshotShowOriginal}
-                        description={t.screenshotShowOriginalHint}
-                      >
-                        <Toggle
-                          checked={!(settings.screenshotTranslation?.directTranslate ?? false)}
-                          onChange={(v) => updateScreenshotTranslation({ directTranslate: !v })}
+                    )}
+
+                    {screenshotOcrMethod === 'baidu' && (
+                      <>
+                        <div className="px-4 py-3 space-y-2.5">
+                          <Label>{t.baiduOcrApiKey}</Label>
+                          <Input
+                            value={settings.screenshotTranslation?.baiduOcr?.apiKey || ''}
+                            onChange={(v) => updateBaiduOcr({ apiKey: v })}
+                            type="password"
+                            placeholder={t.baiduOcrApiKey}
+                            mono
+                          />
+                        </div>
+                        <div className="px-4 py-3 space-y-2.5">
+                          <Label>{t.baiduOcrSecretKey}</Label>
+                          <Input
+                            value={settings.screenshotTranslation?.baiduOcr?.secretKey || ''}
+                            onChange={(v) => updateBaiduOcr({ secretKey: v })}
+                            type="password"
+                            placeholder={t.baiduOcrSecretKey}
+                            mono
+                          />
+                        </div>
+                        <SettingRow label={t.baiduOcrLanguage}>
+                          <Select
+                            className="w-44"
+                            value={settings.screenshotTranslation?.baiduOcr?.languageType || 'CHN_ENG'}
+                            onChange={(v) => updateBaiduOcr({ languageType: v })}
+                            options={[
+                              { value: 'CHN_ENG', label: t.baiduLangChnEng },
+                              { value: 'ENG', label: t.baiduLangEng },
+                              { value: 'JAP', label: t.baiduLangJpn },
+                              { value: 'KOR', label: t.baiduLangKor },
+                              { value: 'FRE', label: t.baiduLangFre },
+                              { value: 'GER', label: t.baiduLangGer },
+                            ]}
+                          />
+                        </SettingRow>
+                        <SettingRow label={t.baiduOcrAccurate} description={t.baiduOcrAccurateHint}>
+                          <Toggle
+                            checked={settings.screenshotTranslation?.baiduOcr?.accurate ?? false}
+                            onChange={(v) => updateBaiduOcr({ accurate: v })}
+                          />
+                        </SettingRow>
+                      </>
+                    )}
+                  </div>
+                </section>
+
+                <section>
+                  <SectionTitle icon={Languages}>{t.screenshotTranslateSection}</SectionTitle>
+                  <div className="settings-card overflow-hidden divide-y divide-black/[0.04] dark:divide-white/[0.05]">
+                    <SettingRow label={t.screenshotTranslationMethod}>
+                      <Select
+                        className="w-56"
+                        value={screenshotTranslationMethod}
+                        onChange={(v) => updateScreenshotTranslation({ translationMethod: v as TranslationMethod })}
+                        options={translationMethodOptions}
+                      />
+                    </SettingRow>
+
+                    {screenshotTranslationMethod === 'ai' && (
+                      <>
+                        <SettingRow label={t.screenshotAiTranslateModel}>
+                          <Select
+                            className="w-60"
+                            value={screenshotAiTranslatePair}
+                            onChange={(v) => {
+                              const [translateProviderId, translateModel] = v.split(':')
+                              updateScreenshotTranslation({ translateProviderId, translateModel })
+                            }}
+                            options={modelPairOptions.length ? modelPairOptions : [{ value: screenshotAiTranslatePair, label: t.selectModelPair }]}
+                          />
+                        </SettingRow>
+                        <SettingRow
+                          label={t.screenshotTranslationStream}
+                          description={t.screenshotTranslationStreamHint}
+                        >
+                          <Toggle
+                            checked={settings.screenshotTranslation?.streamEnabled !== false}
+                            onChange={(v) => updateScreenshotTranslation({ streamEnabled: v })}
+                          />
+                        </SettingRow>
+                      </>
+                    )}
+
+                    {screenshotTranslationMethod === 'baidu' && (
+                      <>
+                        <div className="px-4 py-3 space-y-2.5">
+                          <Label>{t.baiduTranslateAppId}</Label>
+                          <Input
+                            value={settings.screenshotTranslation?.baiduTranslate?.appId || ''}
+                            onChange={(v) => updateBaiduTranslate({ appId: v })}
+                            type="password"
+                            placeholder={t.baiduTranslateAppId}
+                            mono
+                          />
+                        </div>
+                        <div className="px-4 py-3 space-y-2.5">
+                          <Label>{t.baiduTranslateAppKey}</Label>
+                          <Input
+                            value={settings.screenshotTranslation?.baiduTranslate?.appKey || ''}
+                            onChange={(v) => updateBaiduTranslate({ appKey: v })}
+                            type="password"
+                            placeholder={t.baiduTranslateAppKey}
+                            mono
+                          />
+                        </div>
+                      </>
+                    )}
+
+                    {screenshotTranslationMethod === 'tencent' && (
+                      <>
+                        <div className="px-4 py-3 space-y-2.5">
+                          <Label>{t.tencentTranslateSecretId}</Label>
+                          <Input
+                            value={settings.screenshotTranslation?.tencentTranslate?.secretId || ''}
+                            onChange={(v) => updateTencentTranslate({ secretId: v })}
+                            type="password"
+                            placeholder={t.tencentTranslateSecretId}
+                            mono
+                          />
+                        </div>
+                        <div className="px-4 py-3 space-y-2.5">
+                          <Label>{t.tencentTranslateSecretKey}</Label>
+                          <Input
+                            value={settings.screenshotTranslation?.tencentTranslate?.secretKey || ''}
+                            onChange={(v) => updateTencentTranslate({ secretKey: v })}
+                            type="password"
+                            placeholder={t.tencentTranslateSecretKey}
+                            mono
+                          />
+                        </div>
+                      </>
+                    )}
+
+                    {screenshotTranslationMethod === 'caiyun2' && (
+                      <div className="px-4 py-3 space-y-2.5">
+                        <Label>{t.caiyunTranslateToken}</Label>
+                        <Input
+                          value={settings.screenshotTranslation?.caiyunTranslate?.token || ''}
+                          onChange={(v) => updateCaiyunTranslate({ token: v })}
+                          type="password"
+                          placeholder={t.caiyunTranslateToken}
+                          mono
                         />
-                      </SettingRow>
+                      </div>
+                    )}
+
+                    {(screenshotOcrMethod === 'ai' || screenshotTranslationMethod === 'ai') && (
                       <SettingRow
                         label={t.screenshotTranslationThinking}
                         description={t.screenshotTranslationThinkingHint}
@@ -1085,57 +1427,53 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
                           onChange={(v) => updateScreenshotTranslation({ thinkingEnabled: v })}
                         />
                       </SettingRow>
-                      <SettingRow
-                        label={t.screenshotTranslationStream}
-                        description={t.screenshotTranslationStreamHint}
-                      >
-                        <Toggle
-                          checked={settings.screenshotTranslation?.streamEnabled !== false}
-                          onChange={(v) => updateScreenshotTranslation({ streamEnabled: v })}
-                        />
-                      </SettingRow>
-                      <SettingRow
-                        label={t.useSystemOcr}
-                        description={t.useSystemOcrHint}
-                      >
-                        <Toggle
-                          checked={settings.screenshotTranslation?.useSystemOcr ?? false}
-                          onChange={(v) => updateScreenshotTranslation({ useSystemOcr: v })}
-                        />
-                      </SettingRow>
-                      <SettingRow label={t.lensKeepFullscreen} description={t.lensKeepFullscreenHint}>
-                        <Toggle
-                          checked={settings.screenshotTranslation?.keepFullscreenAfterCapture !== false}
-                          onChange={(v) => updateScreenshotTranslation({ keepFullscreenAfterCapture: v })}
-                        />
-                      </SettingRow>
-                      <details className="group border-t border-black/[0.04] dark:border-white/[0.05]">
-                        <summary className="flex items-center gap-1.5 cursor-pointer text-[12px] font-medium text-neutral-600 dark:text-neutral-300 hover:text-neutral-900 dark:hover:text-neutral-100 hover:bg-black/[0.02] dark:hover:bg-white/[0.025] transition-colors list-none px-4 py-3">
-                          <ChevronRight size={13} className="text-neutral-400 dark:text-neutral-500 group-open:rotate-90 transition-transform duration-200" strokeWidth={2.25} />
-                          {t.customPrompts}
-                        </summary>
-                        <div className="px-4 pb-4 space-y-2">
-                          <Label>{t.screenshotTranslationPrompt}</Label>
-                          <TextArea
-                            value={settings.screenshotTranslation?.prompt || ''}
-                            onChange={(v) => updateScreenshotTranslation({ prompt: v })}
-                            placeholder={t.screenshotTranslationPromptHint}
-                            rows={3}
-                          />
-                          {!settings.screenshotTranslation?.prompt?.trim() && (defaultPrompts?.screenshotTranslationTemplate || defaultPrompts?.translationTemplate) && (
-                            <DefaultPrompt
-                              label={t.defaultTemplate}
-                              content={defaultPrompts?.screenshotTranslationTemplate || defaultPrompts?.translationTemplate || ''}
-                            />
-                          )}
-                        </div>
-                      </details>
-                    </>
-                  )}
-                </div>
-              </div>
-            </section>
+                    )}
+                  </div>
+                </section>
 
+                <section>
+                  <SectionTitle icon={SlidersHorizontal}>{t.screenshotDisplaySection}</SectionTitle>
+                  <div className="settings-card overflow-hidden divide-y divide-black/[0.04] dark:divide-white/[0.05]">
+                    <SettingRow
+                      label={t.screenshotShowOriginal}
+                      description={t.screenshotShowOriginalHint}
+                    >
+                      <Toggle
+                        checked={!(settings.screenshotTranslation?.directTranslate ?? false)}
+                        onChange={(v) => updateScreenshotTranslation({ directTranslate: !v })}
+                      />
+                    </SettingRow>
+                    <SettingRow label={t.lensKeepFullscreen} description={t.lensKeepFullscreenHint}>
+                      <Toggle
+                        checked={settings.screenshotTranslation?.keepFullscreenAfterCapture !== false}
+                        onChange={(v) => updateScreenshotTranslation({ keepFullscreenAfterCapture: v })}
+                      />
+                    </SettingRow>
+                    <details className="group">
+                      <summary className="flex items-center gap-1.5 cursor-pointer text-[12px] font-medium text-neutral-600 dark:text-neutral-300 hover:text-neutral-900 dark:hover:text-neutral-100 hover:bg-black/[0.02] dark:hover:bg-white/[0.025] transition-colors list-none px-4 py-3">
+                        <ChevronRight size={13} className="text-neutral-400 dark:text-neutral-500 group-open:rotate-90 transition-transform duration-200" strokeWidth={2.25} />
+                        {t.customPrompts}
+                      </summary>
+                      <div className="px-4 pb-4 space-y-2">
+                        <Label>{t.screenshotTranslationPrompt}</Label>
+                        <TextArea
+                          value={settings.screenshotTranslation?.prompt || ''}
+                          onChange={(v) => updateScreenshotTranslation({ prompt: v })}
+                          placeholder={t.screenshotTranslationPromptHint}
+                          rows={3}
+                        />
+                        {!settings.screenshotTranslation?.prompt?.trim() && (defaultPrompts?.screenshotTranslationTemplate || defaultPrompts?.translationTemplate) && (
+                          <DefaultPrompt
+                            label={t.defaultTemplate}
+                            content={defaultPrompts?.screenshotTranslationTemplate || defaultPrompts?.translationTemplate || ''}
+                          />
+                        )}
+                      </div>
+                    </details>
+                  </div>
+                </section>
+              </>
+            )}
           </div>
         )}
 
@@ -1316,9 +1654,12 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
                         <Input
                           value={provider.baseUrl}
                           onChange={(v) => updateProvider(provider.id, { baseUrl: v })}
-                          placeholder="https://api.openai.com/v1"
+                          placeholder="https://api.openai.com/v1/responses"
                           mono
                         />
+                        <p className="mt-1.5 text-[11px] leading-relaxed text-neutral-400 dark:text-neutral-500">
+                          {t.baseUrlHint}
+                        </p>
                       </div>
                     </div>
                     )}
@@ -1546,13 +1887,12 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
           <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
             <section>
               <div className="flex flex-col items-center justify-center py-6">
-                <div
-                  className="w-16 h-16 rounded-[18px] flex items-center justify-center mb-4 overflow-hidden"
-                  style={{
-                    boxShadow: '0 12px 28px -10px rgba(37,99,235,0.45), 0 2px 6px rgba(37,99,235,0.14)',
-                  }}
-                >
-                  <img src="/icon.png" alt="Kivio" className="w-full h-full object-contain" />
+                <div className="w-16 h-16 flex items-center justify-center mb-4">
+                  <img
+                    src="/emojione--leaf-fluttering-in-wind.svg"
+                    alt="Kivio"
+                    className="w-full h-full object-contain"
+                  />
                 </div>
                 <h2 className="text-[16px] font-semibold text-neutral-900 dark:text-white mb-1 tracking-tight">Kivio</h2>
                 <p className="text-[12px] text-neutral-500 dark:text-neutral-400 mb-5">{lang === 'zh' ? '屏幕级 AI 助手' : 'Screen-level AI Assistant'}</p>

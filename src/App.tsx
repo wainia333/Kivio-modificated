@@ -1,11 +1,16 @@
 import { lazy, Suspense, useState, useEffect, useRef } from 'react'
-import { Settings as SettingsIcon, Cpu } from 'lucide-react'
+import { Settings as SettingsIcon, Cpu, Loader2 } from 'lucide-react'
 import { api } from './api/tauri'
 import { i18n, type Lang } from './settings/i18n'
 import './index.css'
 
 const Settings = lazy(() => import('./Settings'))
 const Lens = lazy(() => import('./Lens'))
+
+const TRANSLATOR_WINDOW_W = 600
+const TRANSLATOR_WINDOW_H = 420
+const SETTINGS_WINDOW_W = 640
+const SETTINGS_WINDOW_H = 520
 
 /**
  * 翻译器主组件
@@ -24,7 +29,7 @@ function Translator({
   const [result, setResult] = useState('')
   const [loading, setLoading] = useState(false)
   const resultRef = useRef<HTMLDivElement>(null)
-  const inputRef = useRef<HTMLInputElement>(null)
+  const inputRef = useRef<HTMLTextAreaElement>(null)
   const translateSeq = useRef(0)
   const t = i18n[lang]
 
@@ -78,20 +83,16 @@ function Translator({
     }
   }, [result])
 
-  // 输入框自动滚动到右侧（显示最新输入）
-  useEffect(() => {
-    if (inputRef.current) {
-      inputRef.current.scrollLeft = inputRef.current.scrollWidth
-    }
-  }, [input])
-
-  // Enter 键提交翻译结果
+  // 多行原文区中，普通 Enter 保持换行；Ctrl/Command + Enter 才提交翻译结果。
   // IME 合成中（中/日/韩输入法选词按回车）不要触发：isComposing 是组合事件官方标志，
   // keyCode === 229 是浏览器在 IME 拦截 keydown 时的兜底信号，两个条件并查更稳。
-  const handleKeyDown = async (e: React.KeyboardEvent<HTMLInputElement>) => {
+  const handleKeyDown = async (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key !== 'Enter') return
     if (e.nativeEvent.isComposing || e.keyCode === 229) return
+    if (!e.ctrlKey && !e.metaKey) return
+    e.preventDefault()
     const textToCommit = result || input
+    if (!textToCommit.trim()) return
     await api.commitTranslation(textToCommit)
     setInput('')
     setResult('')
@@ -103,7 +104,7 @@ function Translator({
       <div className="window-frosted h-full w-full flex flex-col select-none overflow-hidden relative group">
         {/* 顶部隐形 drag bar */}
         <div
-          className="absolute top-0 left-0 right-0 h-6 z-10"
+          className="absolute top-0 left-0 right-0 h-8 z-10"
           data-tauri-drag-region
         />
 
@@ -117,54 +118,71 @@ function Translator({
         </button>
 
         {/* 主内容区 */}
-        <div className="relative z-0 flex-1 flex flex-col justify-center px-3.5 pt-3 pb-2.5">
-        {/* 翻译结果展示（微渐变背景 + 柔光内描边） */}
-        {(result || loading) && (
-          <div
-            ref={resultRef}
-            className="mb-2 px-3 py-2 rounded-xl max-h-14 overflow-y-auto custom-scrollbar bg-gradient-to-br from-neutral-100/90 to-neutral-50/80 dark:from-neutral-800/70 dark:to-neutral-800/40 ring-1 ring-black/[0.04] dark:ring-white/[0.06] shadow-sm"
-          >
-            {loading ? (
-              <div className="flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
-                <span className="flex gap-0.5">
-                  <span className="w-1 h-1 rounded-full bg-neutral-400 dark:bg-neutral-500 animate-pulse" />
-                  <span className="w-1 h-1 rounded-full bg-neutral-400 dark:bg-neutral-500 animate-pulse [animation-delay:0.2s]" />
-                  <span className="w-1 h-1 rounded-full bg-neutral-400 dark:bg-neutral-500 animate-pulse [animation-delay:0.4s]" />
+        <div className="relative z-0 flex h-full min-h-0 flex-col px-4 pt-4 pb-3">
+          <div className="h-5 shrink-0" data-tauri-drag-region />
+
+          <div className="flex min-h-0 flex-1 flex-col gap-3">
+            <section className="flex min-h-0 flex-1 flex-col">
+              <div className="mb-1.5 flex items-center justify-between">
+                <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-neutral-400 dark:text-neutral-500">
+                  {t.shotOriginal}
                 </span>
-                <span className="text-[11px]">{t.translatorTranslating}</span>
               </div>
-            ) : (
-              <p className="text-neutral-800 dark:text-neutral-100 text-[14.5px] font-normal select-text leading-[1.5]">
-                {result}
-              </p>
+              <textarea
+                ref={inputRef}
+                autoFocus
+                spellCheck={false}
+                className="min-h-0 flex-1 w-full resize-none px-3 py-2.5 bg-white/70 dark:bg-neutral-800/40 ring-1 ring-black/[0.05] dark:ring-white/[0.06] rounded-xl text-[14px] leading-[1.48] text-neutral-900 dark:text-white placeholder-neutral-400 dark:placeholder-neutral-500 focus:outline-none focus:ring-black/[0.12] dark:focus:ring-white/[0.18] focus:bg-white dark:focus:bg-neutral-800/70 transition-all custom-scrollbar select-text"
+                placeholder={t.translatorPlaceholder}
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={handleKeyDown}
+              />
+            </section>
+
+            <section className="flex min-h-0 flex-1 flex-col">
+              <div className="mb-1.5 flex items-center gap-1.5">
+                <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-neutral-400 dark:text-neutral-500">
+                  {t.shotTranslated}
+                </span>
+                {loading && (
+                  <span className="flex items-center gap-1 text-[10.5px] text-neutral-400 dark:text-neutral-500">
+                    <Loader2 size={10} className="animate-spin" />
+                    {t.translatorTranslating}
+                  </span>
+                )}
+              </div>
+              <div
+                ref={resultRef}
+                className="min-h-0 flex-1 px-3 py-2.5 rounded-xl overflow-y-auto custom-scrollbar bg-gradient-to-br from-neutral-100/90 to-neutral-50/80 dark:from-neutral-800/70 dark:to-neutral-800/40 ring-1 ring-black/[0.04] dark:ring-white/[0.06] shadow-sm"
+              >
+                {result ? (
+                  <p className="text-neutral-800 dark:text-neutral-100 text-[14px] font-normal select-text leading-[1.55] whitespace-pre-wrap break-words">
+                    {result}
+                  </p>
+                ) : loading ? (
+                  <div className="space-y-2 py-0.5">
+                    <div className="h-3.5 rounded bg-gradient-to-r from-neutral-200 via-neutral-100 to-neutral-200 dark:from-neutral-800 dark:via-neutral-700 dark:to-neutral-800 bg-[length:200%_100%] animate-[shimmer_1.4s_linear_infinite]" />
+                    <div className="h-3.5 rounded bg-gradient-to-r from-neutral-200 via-neutral-100 to-neutral-200 dark:from-neutral-800 dark:via-neutral-700 dark:to-neutral-800 bg-[length:200%_100%] animate-[shimmer_1.4s_linear_infinite] w-[78%]" />
+                  </div>
+                ) : null}
+              </div>
+            </section>
+          </div>
+
+          {/* 底部提示 */}
+          <div className="mt-2.5 flex shrink-0 justify-between items-center text-[10px] text-neutral-400 dark:text-neutral-500">
+            <div className="flex items-center gap-2">
+              <span>{t.translatorHintEnter}</span>
+              <span>{t.translatorHintEsc}</span>
+            </div>
+            {translateSource && (
+              <span className="flex items-center gap-1 opacity-70 max-w-[220px] truncate">
+                <Cpu size={9} strokeWidth={1.5} className="shrink-0" />
+                <span className="truncate">{translateSource}</span>
+              </span>
             )}
           </div>
-        )}
-
-        {/* 输入框（更精致的圆角 + focus 渐变） */}
-        <input
-          ref={inputRef}
-          autoFocus
-          className="w-full px-3.5 py-2 bg-white/70 dark:bg-neutral-800/40 ring-1 ring-black/[0.05] dark:ring-white/[0.06] rounded-xl text-[14.5px] text-neutral-900 dark:text-white placeholder-neutral-400 dark:placeholder-neutral-500 focus:outline-none focus:ring-black/[0.12] dark:focus:ring-white/[0.18] focus:bg-white dark:focus:bg-neutral-800/70 transition-all"
-          placeholder={t.translatorPlaceholder}
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={handleKeyDown}
-        />
-
-        {/* 底部提示 */}
-        <div className="mt-1.5 flex justify-between items-center text-[10px] text-neutral-400 dark:text-neutral-500">
-          <div className="flex items-center gap-2">
-            <span>{t.translatorHintEnter}</span>
-            <span>{t.translatorHintEsc}</span>
-          </div>
-          {translateSource && (
-            <span className="flex items-center gap-1 opacity-70 max-w-[140px] truncate">
-              <Cpu size={9} strokeWidth={1.5} className="shrink-0" />
-              <span className="truncate">{translateSource}</span>
-            </span>
-          )}
-        </div>
         </div>
       </div>
     </div>
@@ -243,9 +261,9 @@ function App() {
   useEffect(() => {
     const resize = async () => {
       if (mode === 'settings') {
-        await api.resizeWindow(640, 520)
+        await api.resizeWindow(SETTINGS_WINDOW_W, SETTINGS_WINDOW_H)
       } else if (mode === '' || mode === 'translator') {
-        await api.resizeWindow(392, 152)
+        await api.resizeWindow(TRANSLATOR_WINDOW_W, TRANSLATOR_WINDOW_H)
       }
     }
     resize()
@@ -256,7 +274,7 @@ function App() {
     window.location.hash = '#settings'
     setMode('settings')
     // 确保窗口大小正确，设置页不置顶
-    await api.resizeWindow(640, 520)
+    await api.resizeWindow(SETTINGS_WINDOW_W, SETTINGS_WINDOW_H)
     await api.setAlwaysOnTop(false)
   }
 
@@ -269,7 +287,7 @@ function App() {
     }
     window.location.hash = ''
     setMode('')
-    await api.resizeWindow(392, 152)
+    await api.resizeWindow(TRANSLATOR_WINDOW_W, TRANSLATOR_WINDOW_H)
   }
 
   // 根据模式渲染对应视图

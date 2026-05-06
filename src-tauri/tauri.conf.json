@@ -14,8 +14,8 @@
       {
         "label": "main",
         "title": "Kivio",
-        "width": 392,
-        "height": 152,
+        "width": 600,
+        "height": 420,
         "resizable": true,
         "decorations": false,
         "transparent": true,

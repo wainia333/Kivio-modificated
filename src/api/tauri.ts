@@ -35,7 +35,7 @@ export type LensTranslateStreamPayload = {
   error?: string | null
 }
 
-// Lens 屏幕窗口元信息（macOS 实际数据；Windows 空数组）
+// Lens 屏幕窗口元信息
 export type LensWindowInfo = {
   id: number
   owner: string
@@ -44,6 +44,11 @@ export type LensWindowInfo = {
   y: number
   width: number
   height: number
+}
+
+export type LensCursorPosition = {
+  x: number
+  y: number
 }
 
 // AI 模型提供商配置
@@ -84,6 +89,31 @@ export type Settings = {
     hotkey: string
     providerId: string
     model: string
+    /** OCR method used after screenshot capture: AI vision, Baidu OCR, or system OCR */
+    ocrMethod?: 'ai' | 'baidu' | 'system'
+    /** Translation interface used after OCR */
+    translationMethod?: 'ai' | 'baidu' | 'google' | 'tencent' | 'bing' | 'bing2' | 'yandex' | 'caiyun2' | 'microsoft'
+    /** AI text translation provider/model. Empty falls back to providerId/model */
+    translateProviderId?: string
+    translateModel?: string
+    baiduOcr?: {
+      apiKey: string
+      secretKey: string
+      languageType?: string
+      accurate?: boolean
+    }
+    baiduTranslate?: {
+      appId: string
+      appKey: string
+      sourceLang?: string
+    }
+    tencentTranslate?: {
+      secretId: string
+      secretKey: string
+    }
+    caiyunTranslate?: {
+      token: string
+    }
     directTranslate?: boolean
     /** 思考模式开关（默认 false）。OCR 模型 + 翻译模型都会注入对应字段 */
     thinkingEnabled?: boolean
@@ -237,6 +267,8 @@ export const api = {
   onLensTranslateStream: (listener: (payload: LensTranslateStreamPayload) => void) =>
     on<LensTranslateStreamPayload>('lens-translate-stream', (payload) => listener(payload)),
   lensRequest: () => invoke<void>('lens_request'),
+  lensCursorPosition: () => invoke<LensCursorPosition | null>('lens_cursor_position'),
+  lensTakeScreenSnapshot: () => invoke<string>('lens_take_screen_snapshot'),
   lensListWindows: () => invoke<LensWindowInfo[]>('lens_list_windows'),
   lensCaptureWindow: (windowId: number) =>
     invoke<{ success: boolean; imageId?: string; error?: string }>('lens_capture_window', { windowId }),
@@ -258,6 +290,14 @@ export const api = {
     invoke<{ success: boolean; original?: string; translated?: string; error?: string }>(
       'lens_translate', { imageId }
     ),
+  lensTranslateText: (text: string) =>
+    invoke<{ success: boolean; translated?: string; error?: string }>(
+      'lens_translate_text', { text }
+    ),
+  synthesizeSpeech: (text: string) =>
+    invoke<{ success: boolean; data?: string; error?: string }>(
+      'synthesize_speech', { text }
+    ),
   lensAsk: (imageId: string, messages: ExplainMessage[]) =>
     invoke<{ success: boolean; response?: string; error?: string }>('lens_ask', { imageId, messages }),
   lensCancelStream: () => invoke<void>('lens_cancel_stream'),
@@ -268,9 +308,18 @@ export const api = {
   // 历史淘汰一条记录时调用，删除 lens-history 中对应 PNG 防止目录无限增长
   lensDeleteHistoryImage: (imageId: string) =>
     invoke<void>('lens_delete_history_image', { imageId }),
-  lensSetFloating: (rect: { x?: number; y?: number; width: number; height: number }) =>
+  lensSetFloating: (rect: {
+    x?: number
+    y?: number
+    width: number
+    height: number
+    hitRegion?: { x: number; y: number; width: number; height: number } | null
+  }) =>
     invoke<void>('lens_set_floating', { rect }),
-
+  lensSetHitRegion: (rect: { x: number; y: number; width: number; height: number } | null) =>
+    invoke<boolean>('lens_set_hit_region', { rect }),
+  lensSetIgnoreCursorEvents: (ignore: boolean) =>
+    invoke<void>('lens_set_ignore_cursor_events', { ignore }),
   // 取走 Rust 端在 lens_request_internal 中抓到的选中文本（take 一次清一次）
   takeLensSelection: () => invoke<string>('take_lens_selection'),
 

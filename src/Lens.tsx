@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent } from 'react'
 import { flushSync } from 'react-dom'
-import { Loader2, Copy, Check, Square, Image as ImageIcon, ArrowUp, History as HistoryIcon, ChevronDown, Brain, MousePointer2 } from 'lucide-react'
+import { Loader2, Copy, Check, Square, Image as ImageIcon, ArrowUp, History as HistoryIcon, ChevronDown, Brain, MousePointer2, Play, X } from 'lucide-react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { api, type LensStreamPayload, type LensTranslateStreamPayload, type LensWindowInfo, type ExplainMessage } from './api/tauri'
+import { api, type LensStreamPayload, type LensTranslateStreamPayload, type LensWindowInfo, type ExplainMessage, type Settings } from './api/tauri'
 import ReactMarkdown from 'react-markdown'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
@@ -12,6 +12,7 @@ import { copyToClipboard } from './utils/clipboard'
 
 type Stage = 'select' | 'ready' | 'answering' | 'translating' | 'translated'
 type Mode = 'chat' | 'translate'
+type SpeechTarget = 'original' | 'translated'
 
 /** 解析 webview hash query：'#lens?mode=translate' → 'translate' */
 function readModeFromHash(): Mode {
@@ -22,9 +23,298 @@ function readModeFromHash(): Mode {
   const params = new URLSearchParams(hash.slice(q + 1))
   return params.get('mode') === 'translate' ? 'translate' : 'chat'
 }
+
+function resolveLensModelLabel(settings: Settings): string {
+  return settings.lens?.model?.trim() || settings.translatorModel?.trim() || 'AI'
+}
+
+function formatLensAsking(template: string, model: string): string {
+  return template.replace('{model}', model || 'AI')
+}
+
+function defaultImageAnalysisQuestion(lang: Lang): string {
+  return lang === 'zh' ? '请分析这张截图。' : 'Please analyze this screenshot.'
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
+function isAsciiAlphaNumeric(ch: string | undefined): boolean {
+  return !!ch && /^[A-Za-z0-9]$/.test(ch)
+}
+
+function isAsciiLetter(ch: string | undefined): boolean {
+  return !!ch && /^[A-Za-z]$/.test(ch)
+}
+
+function isAsciiUppercase(ch: string | undefined): boolean {
+  return !!ch && /^[A-Z]$/.test(ch)
+}
+
+function isUppercaseAcronymEnd(chars: string[], index: number): boolean {
+  if (chars[index] !== '.' || !isAsciiUppercase(chars[index - 1])) return false
+  let count = 1
+  let cursor = index - 2
+  while (cursor >= 1 && chars[cursor] === '.' && isAsciiUppercase(chars[cursor - 1])) {
+    count += 1
+    cursor -= 2
+  }
+  return count >= 2
+}
+
+function shouldAddSpaceAfterEnglishPunctuation(chars: string[], index: number): boolean {
+  const ch = chars[index]
+  if (!['.', ',', ';', ':', '?', '!'].includes(ch)) return false
+
+  const prev = chars[index - 1]
+  const prevPrev = chars[index - 2]
+  const next = chars[index + 1]
+  if (!isAsciiAlphaNumeric(next)) return false
+  if (next && /\s/.test(next)) return false
+  if ((ch === '.' || ch === ',' || ch === ':') && /\d/.test(prev || '') && /\d/.test(next)) return false
+  if (ch === '.' && isAsciiLetter(prev) && isAsciiLetter(next)) {
+    const singleLetterAbbrev = !isAsciiLetter(prevPrev) || prevPrev === '.'
+    if (singleLetterAbbrev && !(isUppercaseAcronymEnd(chars, index) && !isAsciiUppercase(next))) return false
+  }
+  return true
+}
+
+function normalizeEnglishPunctuationSpacing(value: string): string {
+  if (!value) return value
+  const chars = Array.from(value)
+  let out = ''
+  for (let i = 0; i < chars.length; i++) {
+    out += chars[i]
+    if (shouldAddSpaceAfterEnglishPunctuation(chars, i)) out += ' '
+  }
+  return out
+}
+
+function readableParagraphGapClass(value: string): string {
+  return /[\u3400-\u9fff\uf900-\ufaff]/.test(value)
+    ? 'lens-readable-cjk'
+    : 'lens-readable-latin'
+}
+
+function editableOcrHtml(value: string): string {
+  const normalized = normalizeEnglishPunctuationSpacing(value).replace(/\r\n/g, '\n').replace(/\r/g, '\n').trimEnd()
+  if (!normalized) return '<div data-ocr-paragraph><br></div>'
+  return normalized
+    .split(/\n{2,}/)
+    .map(block => block.trim())
+    .filter(Boolean)
+    .map(block => (
+      `<div data-ocr-paragraph>${block.split('\n').map(line => escapeHtml(line)).join('<br>')}</div>`
+    ))
+    .join('')
+}
+
+function nodeEditableText(node: Node): string {
+  if (node.nodeType === Node.TEXT_NODE) return node.textContent || ''
+  if (!(node instanceof HTMLElement)) return ''
+  if (node.tagName === 'BR') return '\n'
+  return Array.from(node.childNodes).map(nodeEditableText).join('')
+}
+
+function isEditableBlock(node: Node): boolean {
+  if (!(node instanceof HTMLElement)) return false
+  return node.hasAttribute('data-ocr-paragraph')
+    || ['DIV', 'P', 'LI', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6'].includes(node.tagName)
+}
+
+function readEditableOcrText(root: HTMLElement): string {
+  const blocks: string[] = []
+  let inline = ''
+  const flushInline = () => {
+    const text = inline.trim()
+    if (text) blocks.push(text)
+    inline = ''
+  }
+
+  Array.from(root.childNodes).forEach(node => {
+    if (isEditableBlock(node)) {
+      flushInline()
+      const text = nodeEditableText(node).replace(/\u00a0/g, ' ').trim()
+      if (text) blocks.push(text)
+    } else {
+      inline += nodeEditableText(node)
+    }
+  })
+  flushInline()
+
+  return blocks.join('\n\n').replace(/\n{3,}/g, '\n\n').trimEnd()
+}
+
+function readableBlocks(value: string): string[] {
+  const normalized = normalizeEnglishPunctuationSpacing(value).replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim()
+  if (!normalized) return []
+  return normalized
+    .split(/\n{2,}/)
+    .map(block => block.trim())
+    .filter(Boolean)
+}
+
+function translatedReadableBlocks(value: string, sourceText: string): string[] {
+  const blocks = readableBlocks(value)
+  if (blocks.length > 1) return blocks
+
+  const sourceBlocks = readableBlocks(sourceText)
+  const lines = value
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean)
+
+  if (sourceBlocks.length > 1 && lines.length >= sourceBlocks.length) {
+    return lines
+  }
+  return blocks.length ? blocks : lines
+}
+
+function splitSpeechText(value: string): string[] {
+  const maxChars = 450
+  const normalized = value
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/\*{3}/g, '')
+    .trim()
+  if (!normalized) return []
+
+  const chunks: string[] = []
+  let current = ''
+  const flush = () => {
+    const text = current.trim()
+    if (text) chunks.push(text)
+    current = ''
+  }
+  const pushSegment = (segment: string) => {
+    const text = segment.trim()
+    if (!text) return
+    const chars = Array.from(text)
+    if (chars.length > maxChars) {
+      flush()
+      for (let i = 0; i < chars.length; i += maxChars) {
+        chunks.push(chars.slice(i, i + maxChars).join('').trim())
+      }
+      return
+    }
+    const nextLen = Array.from(current).length + (current ? 1 : 0) + chars.length
+    if (nextLen > maxChars) flush()
+    current = current ? `${current}\n${text}` : text
+  }
+
+  normalized.split(/\n+/).forEach(line => {
+    const parts = line
+      .split(/([。！？；.!?;]+)/)
+      .reduce<string[]>((acc, part, idx, arr) => {
+        if (idx % 2 === 0) {
+          const punctuation = arr[idx + 1] || ''
+          acc.push(`${part}${punctuation}`)
+        }
+        return acc
+      }, [])
+    parts.forEach(pushSegment)
+  })
+  flush()
+  return chunks.filter(Boolean)
+}
+
+function ReadableMarkdownText({
+  text,
+  sourceText = '',
+}: {
+  text: string
+  sourceText?: string
+}) {
+  const blocks = translatedReadableBlocks(text, sourceText)
+  return (
+    <div className={`lens-readable-text ${readableParagraphGapClass(text)} prose prose-sm dark:prose-invert max-w-none text-[13px] leading-[1.48] text-neutral-800 dark:text-neutral-200`}>
+      {blocks.map((block, idx) => (
+        <div key={`${idx}-${block.slice(0, 16)}`} className="translated-readable-block">
+          <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
+            {block}
+          </ReactMarkdown>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function EditableOcrText({
+  value,
+  onChange,
+}: {
+  value: string
+  onChange: (value: string) => void
+}) {
+  const rootRef = useRef<HTMLDivElement>(null)
+  const lastEmittedRef = useRef(value)
+  const composingRef = useRef(false)
+
+  useLayoutEffect(() => {
+    const root = rootRef.current
+    if (!root) return
+    if (value === lastEmittedRef.current) return
+    root.innerHTML = editableOcrHtml(value)
+    lastEmittedRef.current = readEditableOcrText(root)
+  }, [value])
+
+  useLayoutEffect(() => {
+    const root = rootRef.current
+    if (!root) return
+    root.innerHTML = editableOcrHtml(value)
+    lastEmittedRef.current = value
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const emit = useCallback(() => {
+    if (composingRef.current) return
+    const root = rootRef.current
+    if (!root) return
+    const next = readEditableOcrText(root)
+    if (next === lastEmittedRef.current) return
+    lastEmittedRef.current = next
+    onChange(next)
+  }, [onChange])
+
+  const handlePaste = useCallback((e: ClipboardEvent<HTMLDivElement>) => {
+    const text = e.clipboardData.getData('text/plain')
+    if (!text) return
+    e.preventDefault()
+    document.execCommand('insertText', false, text)
+    requestAnimationFrame(emit)
+  }, [emit])
+
+  return (
+    <div
+      ref={rootRef}
+      contentEditable
+      suppressContentEditableWarning
+      spellCheck={false}
+      onInput={emit}
+      onBlur={emit}
+      onPaste={handlePaste}
+      onCompositionStart={() => { composingRef.current = true }}
+      onCompositionEnd={() => {
+        composingRef.current = false
+        emit()
+      }}
+      className={`ocr-editable lens-readable-text ${readableParagraphGapClass(value)} prose prose-sm dark:prose-invert max-w-none text-[13px] leading-[1.48] text-neutral-800 dark:text-neutral-200 custom-scrollbar`}
+    />
+  )
+}
+
 type Point = { x: number; y: number }
+type Rect = { x: number; y: number; width: number; height: number }
 type BarRect = { x: number; y: number; width: number }
 type CapturedFrame = { x: number; y: number; width: number; height: number; label: string }
+type CopyTarget = 'answer' | 'original' | 'translated'
 type Arrow = {
   x1: number
   y1: number
@@ -48,29 +338,95 @@ const HISTORY_MAX = 20
 const HISTORY_STORAGE_KEY = 'kivio:lens-history:v1'
 const HISTORY_STORAGE_KEY_LEGACY = 'keylingo:lens-history:v1'  // v2.4.5 之前的 key,启动时一次性迁移
 const HISTORY_THUMB_SIZE = 96     // 历史记录缩略图边长（px），原始截图压成这个尺寸再持久化
+const HISTORY_PANEL_W = 240
+const HISTORY_PANEL_MAX_H = 200
+const HISTORY_PANEL_MIN_H = 56
+const HISTORY_PANEL_GAP = 8
+const HISTORY_BUTTON_ESTIMATED_H = 36
 
 const READY_BAR_H = 56            // 对话栏单行高度（与字号绑定，不随屏幕变）
 const ANCHOR_GAP = 12              // 对话栏与选区之间的水平间距
 const DRAG_THRESHOLD = 5
-/** Approximate CSS cubic-bezier(x1,y1,x2,y2): given linear time t in [0,1] return eased progress.
- *  用 bisection 解 bezier_x(u)=t 求出参数 u，再求 bezier_y(u)。30 次足够单像素精度。 */
-function cubicBezier(t: number, x1: number, y1: number, x2: number, y2: number): number {
-  if (t <= 0) return 0
-  if (t >= 1) return 1
-  let lo = 0, hi = 1
-  for (let i = 0; i < 30; i++) {
-    const u = (lo + hi) / 2
-    const x = 3 * (1 - u) * (1 - u) * u * x1 + 3 * (1 - u) * u * u * x2 + u * u * u
-    if (x < t) lo = u
-    else hi = u
+const SELECT_MASK_COLOR = 'rgba(0, 0, 0, 0.118)'
+const SHAREX_REGION_ANIMATION_MS = 200
+function findWindowAt(windows: LensWindowInfo[], gp: Point): LensWindowInfo | null {
+  for (const w of windows) {
+    if (gp.x >= w.x && gp.x < w.x + w.width && gp.y >= w.y && gp.y < w.y + w.height) {
+      return w
+    }
   }
-  const u = (lo + hi) / 2
-  return 3 * (1 - u) * (1 - u) * u * y1 + 3 * (1 - u) * u * u * y2 + u * u * u
+  return null
+}
+
+function lerpNumber(from: number, to: number, t: number): number {
+  return from + (to - from) * t
+}
+
+function lerpRect(from: Rect, to: Rect, t: number): Rect {
+  return {
+    x: lerpNumber(from.x, to.x, t),
+    y: lerpNumber(from.y, to.y, t),
+    width: lerpNumber(from.width, to.width, t),
+    height: lerpNumber(from.height, to.height, t),
+  }
+}
+
+function rectEquals(a: Rect | null, b: Rect | null): boolean {
+  if (!a || !b) return a === b
+  return a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height
+}
+
+function clampRect(rect: Rect | null, viewport: { w: number; h: number }): Rect | null {
+  if (!rect) return null
+  const x = Math.max(0, Math.min(viewport.w, rect.x))
+  const y = Math.max(0, Math.min(viewport.h, rect.y))
+  const right = Math.max(x, Math.min(viewport.w, rect.x + rect.width))
+  const bottom = Math.max(y, Math.min(viewport.h, rect.y + rect.height))
+  const width = right - x
+  const height = bottom - y
+  if (width < 1 || height < 1) return null
+  return { x, y, width, height }
+}
+
+function inflateRect(rect: Rect, amount: number): Rect {
+  return {
+    x: rect.x - amount,
+    y: rect.y - amount,
+    width: rect.width + amount * 2,
+    height: rect.height + amount * 2,
+  }
+}
+
+function unionRects(rects: Rect[]): Rect | null {
+  if (rects.length === 0) return null
+  let left = rects[0].x
+  let top = rects[0].y
+  let right = rects[0].x + rects[0].width
+  let bottom = rects[0].y + rects[0].height
+  for (const rect of rects.slice(1)) {
+    left = Math.min(left, rect.x)
+    top = Math.min(top, rect.y)
+    right = Math.max(right, rect.x + rect.width)
+    bottom = Math.max(bottom, rect.y + rect.height)
+  }
+  return { x: left, y: top, width: right - left, height: bottom - top }
+}
+
+function domRectToRect(rect: DOMRect): Rect | null {
+  if (rect.width < 1 || rect.height < 1) return null
+  return {
+    x: rect.left,
+    y: rect.top,
+    width: rect.width,
+    height: rect.height,
+  }
 }
 
 const TRANSITION_MS = 380
+const SELECT_BAR_COLLAPSE_MS = 120
 const FLOATING_PADDING = 0
 const FLOATING_GAP = 8
+const HIT_REGION_MARGIN = 2
 
 /** Canvas 缩放截图为小缩略图，避免历史记录把整张原图（几 MB）写进 localStorage */
 async function makeThumbnail(dataUrl: string, maxSize: number): Promise<string> {
@@ -377,6 +733,67 @@ function ThinkingBlock({
   )
 }
 
+function ShareXSelectionFrame({ rect, animated = true }: { rect: Rect; animated?: boolean }) {
+  const width = Math.max(1, rect.width)
+  const height = Math.max(1, rect.height)
+  const x = 0.5
+  const y = 0.5
+  const w = Math.max(0, width - 1)
+  const h = Math.max(0, height - 1)
+
+  return (
+    <svg
+      className="absolute pointer-events-none overflow-visible"
+      style={{ left: rect.x, top: rect.y, width, height, zIndex: 8 }}
+      width={width}
+      height={height}
+      shapeRendering="crispEdges"
+    >
+      <rect x={x} y={y} width={w} height={h} fill="none" stroke="black" strokeWidth={1} />
+      <rect
+        x={x}
+        y={y}
+        width={w}
+        height={h}
+        fill="none"
+        stroke="white"
+        strokeWidth={1}
+        strokeDasharray="5 5"
+        className={animated ? 'sharex-selection-dash' : undefined}
+      />
+    </svg>
+  )
+}
+
+function ShareXInfoLabel({ rect, text, viewport }: { rect: Rect; text: string; viewport: { w: number; h: number } }) {
+  const estimatedWidth = Math.max(72, text.length * 7 + 12)
+  const estimatedHeight = 22
+  const gap = 6
+  const padding = 3
+  const x = Math.max(0, Math.min(viewport.w - estimatedWidth - padding, rect.x + padding))
+  const y = rect.y - gap - estimatedHeight >= 0
+    ? rect.y - gap - estimatedHeight
+    : Math.min(viewport.h - estimatedHeight - padding, rect.y + gap + padding)
+
+  return (
+    <div
+      className="absolute pointer-events-none whitespace-nowrap font-[Verdana] text-[11px] leading-[16px] text-white"
+      style={{
+        left: x,
+        top: Math.max(0, y),
+        padding: '2px 3px',
+        backgroundColor: 'rgba(0, 0, 0, 0.47)',
+        border: '1px solid rgba(255, 255, 255, 0.59)',
+        boxShadow: 'inset 0 0 0 1px rgba(0, 81, 145, 0.59), 1px 1px 0 rgba(0, 0, 0, 0.75)',
+        textShadow: '1px 1px 0 #000',
+        zIndex: 9,
+      }}
+    >
+      {text}
+    </div>
+  )
+}
+
 /**
  * Lens 模式：单 webview 三态机，统一 DOM。
  * - select：webview 全屏 + 灰幕 + hover 应用窗口高亮 + 区域 drag + 底部对话栏（纯文字直发）
@@ -393,6 +810,9 @@ export default function Lens() {
   const [dragStart, setDragStart] = useState<Point | null>(null)
   const [dragCurrent, setDragCurrent] = useState<Point | null>(null)
   const [dragging, setDragging] = useState(false)
+  const [selectBarCollapsed, setSelectBarCollapsed] = useState(false)
+  const [animatedHoverRect, setAnimatedHoverRect] = useState<Rect | null>(null)
+  const [screenSnapshot, setScreenSnapshot] = useState('')
   const [imagePreview, setImagePreview] = useState('')
   const [appLabel, setAppLabel] = useState('')
   const [input, setInput] = useState('')
@@ -401,8 +821,11 @@ export default function Lens() {
   const [selectionText, setSelectionText] = useState('')
   const [messages, setMessages] = useState<ExplainMessage[]>([])
   const [streaming, setStreaming] = useState(false)
-  const [copied, setCopied] = useState(false)
+  const [copiedTarget, setCopiedTarget] = useState<CopyTarget | null>(null)
+  const [speechLoadingTarget, setSpeechLoadingTarget] = useState<SpeechTarget | null>(null)
+  const [speakingTarget, setSpeakingTarget] = useState<SpeechTarget | null>(null)
   const [lang, setLang] = useState<Lang>('zh')
+  const [activeLensModel, setActiveLensModel] = useState('AI')
   const [messageOrder, setMessageOrder] = useState<'asc' | 'desc'>('asc')
   const [keepFullscreen, setKeepFullscreen] = useState(true)
   const [floatingRebased, setFloatingRebased] = useState(false)
@@ -412,8 +835,14 @@ export default function Lens() {
   const [translateText, setTranslateText] = useState('')
   const [translateError, setTranslateError] = useState('')
   const [translateDurationMs, setTranslateDurationMs] = useState<number | null>(null)
+  const [showTranslateOriginal, setShowTranslateOriginal] = useState(true)
+  const [translateRetranslating, setTranslateRetranslating] = useState(false)
   const [translateNow, setTranslateNow] = useState(() => Date.now())
   const translateStartRef = useRef<number | null>(null)
+  const translateEditDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const translateEditSeqRef = useRef(0)
+  const translateOriginalEditedRef = useRef(false)
+  const ignoreTranslateStreamRef = useRef(false)
   // viewport 大小：监听 resize（拔显示器/系统缩放变化都会触发），所有相对尺寸由此重算
   const [viewport, setViewport] = useState(() => ({
     w: typeof window !== 'undefined' ? window.innerWidth : 1280,
@@ -431,6 +860,12 @@ export default function Lens() {
   // 残留的 380ms 动画在 window hide 时被暂停，下次 show 时从中间帧续播 → 视觉上 bar
   // 从老位置"滑"回 select 默认位置的闪烁。
   const [barNoTransition, setBarNoTransition] = useState(false)
+  const [barFlyOffset, setBarFlyOffset] = useState<Point>({ x: 0, y: 0 })
+  // 旧原生浮窗交接遗留的隐藏开关；截图完成后不再自动缩放/移动原生窗口。
+  const [barRebaseHidden, setBarRebaseHidden] = useState(false)
+  // 截图后输入栏会从 select 位置飞到截图附近。Windows 原生命中裁剪不能在动画中裁得太紧，
+  // 否则 WebView 会把正在飞行的卡片裁掉。
+  const [barInFlight, setBarInFlight] = useState(false)
   // capturedFrame：保留最后一次截图选区/窗口的高亮框，作为"已截图"视觉标记，ready/answering 态继续显示
   const [capturedFrame, setCapturedFrame] = useState<CapturedFrame | null>(null)
   // 箭头标注:仅 stage==='ready' 子模式
@@ -449,18 +884,29 @@ export default function Lens() {
   // 内存历史：单次 app 生命周期保留，esc/hide 不清空
   const [history, setHistory] = useState<HistoryItem[]>(loadHistoryFromStorage)
   const [historyOpen, setHistoryOpen] = useState(false)
+  const [hitRegionRect, setHitRegionRect] = useState<Rect | null>(null)
+  const [nativeHitRegionActive, setNativeHitRegionActive] = useState(false)
 
   const inputRef = useRef<HTMLInputElement>(null)
+  const barPanelRef = useRef<HTMLDivElement>(null)
+  const answerPanelRef = useRef<HTMLDivElement>(null)
+  const translateCardRef = useRef<HTMLDivElement>(null)
   const historyPanelRef = useRef<HTMLDivElement>(null)
+  const historyDropdownRef = useRef<HTMLDivElement>(null)
   const stageRef = useRef<Stage>('select')
   const modeRef = useRef<Mode>(mode)
   const historyOpenRef = useRef(false)
   const imageIdRef = useRef('')
   const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const speechAudioRef = useRef<HTMLAudioElement | null>(null)
+  const speechSeqRef = useRef(0)
   const floatingRebaseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const floatingRebaseSeqRef = useRef(0)
+  const barFlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const focusReqIdRef = useRef(0)
   const prevStreamingRef = useRef(false)
   const preparingSendRef = useRef(false)
+  const closeResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // Stream 真实结束（成功 / 错误 / 用户主动取消）后才置 true，
   // 让历史持久化 effect 只在这一次 rerun 触发 push；restoreHistory / enterSelect / resetBeforeHide 防御性清零，
   // 避免恢复历史时 setMessages 触发 effect 把恢复的对话又当新条目写一遍历史。
@@ -475,11 +921,37 @@ export default function Lens() {
   const chatScrollRef = useRef<HTMLDivElement>(null)
   // 浮动模式下保存截图时的全屏 metrics，避免窗口缩小后 answerLayout 被压缩得太小
   const fullscreenMetricsRef = useRef<Metrics | null>(null)
+  const hoverAnimationRef = useRef<{ rect: Rect | null; raf: number | null }>({ rect: null, raf: null })
+  const floatingSizeRef = useRef<{ width: number; height: number } | null>(null)
+  const cursorPassthroughRef = useRef(false)
+  const panelDraggingRef = useRef(false)
 
   const t = i18n[lang]
   stageRef.current = stage
   modeRef.current = mode
   historyOpenRef.current = historyOpen
+
+  const stopSpeechPlayback = useCallback(() => {
+    speechSeqRef.current += 1
+    const audio = speechAudioRef.current
+    if (audio) {
+      audio.pause()
+      audio.removeAttribute('src')
+      audio.load()
+    }
+    speechAudioRef.current = null
+    setSpeechLoadingTarget(null)
+    setSpeakingTarget(null)
+  }, [])
+
+  const setLensCursorPassthrough = useCallback((ignore: boolean) => {
+    if (cursorPassthroughRef.current === ignore) return
+    cursorPassthroughRef.current = ignore
+    void api.lensSetIgnoreCursorEvents(ignore).catch(err => {
+      cursorPassthroughRef.current = !ignore
+      console.error('[lens-floating] cursor passthrough failed:', err)
+    })
+  }, [])
 
   // 选中文本行数：translate 模式不计；空 / 仅空白 → 0（驱动徽章是否显示）
   const selectionLineCount = useMemo(() => {
@@ -495,10 +967,14 @@ export default function Lens() {
       try {
         const settings = await api.getSettings()
         setLang((settings.settingsLanguage as Lang) || 'zh')
+        setActiveLensModel(resolveLensModelLabel(settings))
         setMessageOrder(settings.lens?.messageOrder === 'desc' ? 'desc' : 'asc')
         const curMode = readModeFromHash()
         const cfg = curMode === 'translate' ? settings.screenshotTranslation : settings.lens
         setKeepFullscreen(cfg?.keepFullscreenAfterCapture !== false)
+        if (curMode === 'translate') {
+          setShowTranslateOriginal(!(settings.screenshotTranslation?.directTranslate ?? false))
+        }
       } catch (err) { console.error('Failed to load settings', err) }
     })()
   }, [])
@@ -530,19 +1006,60 @@ export default function Lens() {
     delays.forEach(delay => window.setTimeout(() => { void run() }, delay))
   }, [])
 
+  const markBarFlight = useCallback((duration = TRANSITION_MS) => {
+    if (barFlightTimerRef.current) {
+      clearTimeout(barFlightTimerRef.current)
+      barFlightTimerRef.current = null
+    }
+    setBarInFlight(true)
+    barFlightTimerRef.current = window.setTimeout(() => {
+      barFlightTimerRef.current = null
+      setBarInFlight(false)
+    }, duration + 80)
+  }, [])
+
   // select 态进入：刷新所有 state、重算对话栏位置、播放 intro 动画
   const enterSelect = useCallback(async () => {
+    setLensCursorPassthrough(false)
+    void api.lensSetHitRegion(null).catch(err => console.error('[lens-floating] clear hit region failed:', err))
+    setHitRegionRect(null)
+    stopSpeechPlayback()
+    panelDraggingRef.current = false
+    if (closeResetTimerRef.current) {
+      clearTimeout(closeResetTimerRef.current)
+      closeResetTimerRef.current = null
+    }
     if (floatingRebaseTimerRef.current) {
       clearTimeout(floatingRebaseTimerRef.current)
       floatingRebaseTimerRef.current = null
     }
+    floatingRebaseSeqRef.current++
+    if (barFlightTimerRef.current) {
+      clearTimeout(barFlightTimerRef.current)
+      barFlightTimerRef.current = null
+    }
+    if (barFlightTimerRef.current) {
+      clearTimeout(barFlightTimerRef.current)
+      barFlightTimerRef.current = null
+    }
+    if (translateEditDebounceRef.current) {
+      clearTimeout(translateEditDebounceRef.current)
+      translateEditDebounceRef.current = null
+    }
+    translateEditSeqRef.current++
+    translateOriginalEditedRef.current = false
+    ignoreTranslateStreamRef.current = false
     fullscreenMetricsRef.current = null
     // 重新加载设置：用户在设置面板修改后关闭再打开 Lens，需要读到最新值。按当前 mode 选 lens / screenshotTranslation 配置。
     try {
       const settings = await api.getSettings()
       const curMode = readModeFromHash()
       const cfg = curMode === 'translate' ? settings.screenshotTranslation : settings.lens
+      setActiveLensModel(resolveLensModelLabel(settings))
       setKeepFullscreen(cfg?.keepFullscreenAfterCapture !== false)
+      if (curMode === 'translate') {
+        setShowTranslateOriginal(!(settings.screenshotTranslation?.directTranslate ?? false))
+      }
     } catch (err) { console.error('Failed to reload settings', err) }
     // 防御：reset 流程会 setMessages([]) + setStreaming(false)，理论上 messages.length===0 effect 不会进
     // 持久化分支，但显式清零更稳
@@ -552,22 +1069,32 @@ export default function Lens() {
     // barNoTransition 同 frame 一起置 true → bar 从老坐标 snap 到 select 坐标，不动画。
     flushSync(() => {
       setBarNoTransition(true)
+      setBarFlyOffset({ x: 0, y: 0 })
+      setBarRebaseHidden(false)
+      setBarInFlight(false)
       setStage('select')
       setMode(readModeFromHash())
       setFloatingRebased(false)
+      floatingSizeRef.current = null
       setHovered(null)
       setDragStart(null)
       setDragCurrent(null)
       setDragging(false)
+      setSelectBarCollapsed(false)
+      setAnimatedHoverRect(null)
+      setScreenSnapshot('')
       setImagePreview('')
       setAppLabel('')
       setInput('')
       setSelectionText('')
       setMessages([])
       setStreaming(false)
+      setCopiedTarget(null)
       setTranslateOriginal('')
       setTranslateText('')
       setTranslateError('')
+      setTranslateDurationMs(null)
+      setTranslateRetranslating(false)
       const w = window.innerWidth
       const h = window.innerHeight
       setViewport({ w, h })
@@ -577,6 +1104,11 @@ export default function Lens() {
       setBarIntro(false)
     })
     imageIdRef.current = ''
+    hoverAnimationRef.current.rect = null
+    if (hoverAnimationRef.current.raf !== null) {
+      cancelAnimationFrame(hoverAnimationRef.current.raf)
+      hoverAnimationRef.current.raf = null
+    }
     // 异步 take 走 Rust 端在 lens_request_internal 中暂存的选中文本。
     // token 防御：take 期间用户再开一次 Lens / 关闭，老 promise 落地时 myReq 已过期，丢弃。
     // 仅 chat 模式注入；> 200KB 直接丢弃避免上下文爆炸；trim 后非空才 setSelectionText。
@@ -596,6 +1128,9 @@ export default function Lens() {
         }
       })()
     }
+    void api.lensTakeScreenSnapshot()
+      .then(snapshot => setScreenSnapshot(snapshot || ''))
+      .catch(err => console.warn('[lens] take screen snapshot failed:', err))
     requestAnimationFrame(() => {
       // 第二个 raf 同时恢复 transitions 并触发 intro：现在 bar 已经在 select 位置，
       // 只对 transform/opacity 做缩放进入动画，不会回放历史 left/top 过渡。
@@ -604,22 +1139,32 @@ export default function Lens() {
         setBarNoTransition(false)
       })
     })
+    let currentOrigin = { x: 0, y: 0 }
     try {
       const win = getCurrentWindow()
-      const [pos, scale] = await Promise.all([win.outerPosition(), win.scaleFactor()])
+      const [pos, scale] = await Promise.all([win.innerPosition(), win.scaleFactor()])
       const sf = scale || 1
-      setWinOrigin({ x: pos.x / sf, y: pos.y / sf })
+      currentOrigin = { x: pos.x / sf, y: pos.y / sf }
+      setWinOrigin(currentOrigin)
     } catch (err) { console.error('Failed to read window origin', err) }
     try {
-      const list = await api.lensListWindows()
+      const [list, cursor] = await Promise.all([
+        api.lensListWindows(),
+        api.lensCursorPosition().catch((err) => {
+          console.warn('[lens] cursor position failed:', err)
+          return null
+        }),
+      ])
       setWindows(list)
+      setHovered(cursor ? findWindowAt(list, cursor) : null)
     } catch (err) {
       console.error('Failed to list windows', err)
       setWindows([])
+      setHovered(null)
     }
     await api.showWindow()
     focusLensInput()
-  }, [focusLensInput])
+  }, [focusLensInput, setLensCursorPassthrough, stopSpeechPlayback])
 
   useEffect(() => {
     void enterSelect()
@@ -771,31 +1316,59 @@ export default function Lens() {
     return () => clearTimeout(id)
   }, [streaming, mode, historyOpen, focusLensInput])
 
-  // 关闭前同步重置 state，让 webview surface 在 hide 之前已经是空 select 态。
-  // 否则下次 show 时 macOS 会先显示上次的 ready 态 surface 一帧，再被 lens:reset 覆盖 → 闪一下上次内容。
+  // 关闭时重置 state，让隐藏后的 webview surface 回到空 select 态。
+  // 否则下次 show 时可能先显示上次的 ready/result 态 surface 一帧，再被 lens:reset 覆盖。
   // barNoTransition：禁用 left/top/width transition，避免 380ms 动画被 hide 暂停后下次 show 续播。
   const resetBeforeHide = useCallback(() => {
+    setLensCursorPassthrough(false)
+    void api.lensSetHitRegion(null).catch(err => console.error('[lens-floating] clear hit region failed:', err))
+    setHitRegionRect(null)
+    stopSpeechPlayback()
+    panelDraggingRef.current = false
+    if (closeResetTimerRef.current) {
+      clearTimeout(closeResetTimerRef.current)
+      closeResetTimerRef.current = null
+    }
     if (floatingRebaseTimerRef.current) {
       clearTimeout(floatingRebaseTimerRef.current)
       floatingRebaseTimerRef.current = null
     }
+    floatingRebaseSeqRef.current++
+    if (translateEditDebounceRef.current) {
+      clearTimeout(translateEditDebounceRef.current)
+      translateEditDebounceRef.current = null
+    }
+    translateEditSeqRef.current++
+    translateOriginalEditedRef.current = false
+    ignoreTranslateStreamRef.current = false
     fullscreenMetricsRef.current = null
     // 防御：和 enterSelect 同理 —— reset 路径不该走持久化
     justFinishedStreamRef.current = false
     flushSync(() => {
       setBarNoTransition(true)
+      setBarFlyOffset({ x: 0, y: 0 })
+      setBarRebaseHidden(false)
+      setBarInFlight(false)
       setStage('select')
       setFloatingRebased(false)
       setHovered(null)
       setDragStart(null)
       setDragCurrent(null)
       setDragging(false)
+      setSelectBarCollapsed(false)
+      setScreenSnapshot('')
       setImagePreview('')
       setAppLabel('')
       setInput('')
       setSelectionText('')
       setMessages([])
       setStreaming(false)
+      setCopiedTarget(null)
+      setTranslateOriginal('')
+      setTranslateText('')
+      setTranslateError('')
+      setTranslateDurationMs(null)
+      setTranslateRetranslating(false)
       setBarRect(computeSelectBar(viewport.w, viewport.h, metrics))
       setCapturedFrame(null)
       setBarIntro(false)
@@ -804,24 +1377,37 @@ export default function Lens() {
     // 让任何还没落地的 takeLensSelection 老 promise 作废，避免关闭后 setSelectionText 拖回来
     selectionReqIdRef.current++
     focusReqIdRef.current++
-  }, [viewport, metrics])
+  }, [viewport, metrics, setLensCursorPassthrough, stopSpeechPlayback])
+
+  const resetAfterClose = useCallback(() => {
+    if (closeResetTimerRef.current) clearTimeout(closeResetTimerRef.current)
+    closeResetTimerRef.current = window.setTimeout(() => {
+      closeResetTimerRef.current = null
+      resetBeforeHide()
+    }, 80)
+  }, [resetBeforeHide])
+
+  const closeLikeEscape = useCallback(async () => {
+    if (preparingSendRef.current) return
+    if (stageRef.current === 'answering' && streaming) {
+      try { await api.lensCancelStream() } catch (err) { console.error(err) }
+      setStreaming(false)
+      return
+    }
+    setLensCursorPassthrough(false)
+    try { await api.lensClose() } catch (err) { console.error(err) }
+    resetAfterClose()
+  }, [resetAfterClose, setLensCursorPassthrough, streaming])
 
   // 全局 Esc：流式时取消流 / 否则关闭
   useEffect(() => {
     const handler = async (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
-      if (preparingSendRef.current) return
-      if (stageRef.current === 'answering' && streaming) {
-        try { await api.lensCancelStream() } catch (err) { console.error(err) }
-        setStreaming(false)
-        return
-      }
-      resetBeforeHide()
-      try { await api.lensClose() } catch (err) { console.error(err) }
+      await closeLikeEscape()
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [streaming, resetBeforeHide])
+  }, [closeLikeEscape])
 
   // drawMode 键盘:Cmd+Z 撤销最后一支箭头,Esc 退出 drawMode(arrows 保留)
   useEffect(() => {
@@ -857,13 +1443,15 @@ export default function Lens() {
     const handleBlur = () => {
       if (capturingRef.current) return
       if (stageRef.current === 'select') {
-        resetBeforeHide()
-        void api.lensClose()
+        void (async () => {
+          try { await api.lensClose() } catch (err) { console.error(err) }
+          resetAfterClose()
+        })()
       }
     }
     window.addEventListener('blur', handleBlur)
     return () => window.removeEventListener('blur', handleBlur)
-  }, [resetBeforeHide])
+  }, [resetAfterClose])
 
   /** webview client 坐标 → 全局逻辑坐标（与 CGWindow bounds 同坐标系） */
   const clientToGlobal = (p: Point): Point => ({
@@ -873,12 +1461,7 @@ export default function Lens() {
 
   /** 命中检测：找第一个包含该全局坐标的应用窗口 */
   const hitTest = (gp: Point): LensWindowInfo | null => {
-    for (const w of windows) {
-      if (gp.x >= w.x && gp.x < w.x + w.width && gp.y >= w.y && gp.y < w.y + w.height) {
-        return w
-      }
-    }
-    return null
+    return findWindowAt(windows, gp)
   }
 
   // 拖动选区矩形（webview 内坐标）
@@ -902,12 +1485,71 @@ export default function Lens() {
     }
   }, [hovered, dragging, winOrigin])
 
+  useEffect(() => {
+    const hoverAnimation = hoverAnimationRef.current
+    if (hoverAnimation.raf !== null) {
+      cancelAnimationFrame(hoverAnimation.raf)
+      hoverAnimation.raf = null
+    }
+
+    if (dragging || !hoverRect) {
+      hoverAnimation.rect = hoverRect
+      setAnimatedHoverRect(hoverRect)
+      return
+    }
+
+    const from = hoverAnimation.rect ?? hoverRect
+    const to = hoverRect
+    if (rectEquals(from, to)) {
+      hoverAnimation.rect = to
+      setAnimatedHoverRect(to)
+      return
+    }
+
+    const startedAt = performance.now()
+    const step = (now: number) => {
+      const tLinear = Math.min((now - startedAt) / SHAREX_REGION_ANIMATION_MS, 1)
+      const next = lerpRect(from, to, tLinear)
+      hoverAnimation.rect = next
+      setAnimatedHoverRect(next)
+      if (tLinear < 1) {
+        hoverAnimation.raf = requestAnimationFrame(step)
+      } else {
+        hoverAnimation.raf = null
+      }
+    }
+
+    hoverAnimation.raf = requestAnimationFrame(step)
+    return () => {
+      if (hoverAnimation.raf !== null) {
+        cancelAnimationFrame(hoverAnimation.raf)
+        hoverAnimation.raf = null
+      }
+    }
+  }, [hoverRect, dragging])
+
+  const selectFocusRect = useMemo(() => {
+    return clampRect(dragging && dragRect ? dragRect : null, viewport)
+  }, [dragging, dragRect, viewport])
+
+  const selectFrameRect = useMemo(() => {
+    return clampRect(dragging && dragRect ? dragRect : animatedHoverRect, viewport)
+  }, [dragging, dragRect, animatedHoverRect, viewport])
+
+  const selectFrameText = useMemo(() => {
+    if (!selectFrameRect) return ''
+    const x = winOrigin.x + selectFrameRect.x
+    const y = winOrigin.y + selectFrameRect.y
+    return `X: ${Math.round(x)}, Y: ${Math.round(y)}, ${Math.round(selectFrameRect.width)} x ${Math.round(selectFrameRect.height)}`
+  }, [selectFrameRect, winOrigin])
+
   const handleMouseDown = (e: React.MouseEvent) => {
     if (stage !== 'select') return
     const p: Point = { x: e.clientX, y: e.clientY }
     setDragStart(p)
     setDragCurrent(p)
     setDragging(false)
+    setSelectBarCollapsed(false)
   }
 
   const handleMouseMove = (e: React.MouseEvent) => {
@@ -919,6 +1561,9 @@ export default function Lens() {
       const dy = Math.abs(p.y - dragStart.y)
       if (!dragging && (dx > DRAG_THRESHOLD || dy > DRAG_THRESHOLD)) {
         setDragging(true)
+        setSelectBarCollapsed(true)
+        setHistoryOpen(false)
+        inputRef.current?.blur()
         setHovered(null)
       }
       return
@@ -927,14 +1572,12 @@ export default function Lens() {
     setHovered(hitTest(gp))
   }
 
-  /** 截图后 lens 默认模式：在前端直接算 bar 位置，让对话栏飞到选区左/右侧（不再上下出现）。
-   *  优先右侧，右侧空间不够再放左侧；都不够时贴大空间一侧。垂直与选区中心对齐并 clamp 在 viewport 内。 */
-  const flyBarToAnchor = async (
+  const resolveFloatingAnchor = (
     anchorAbsX: number,
     anchorAbsY: number,
     anchorW: number,
     anchorH: number,
-    label: string,
+    activeMode: Mode = modeRef.current,
   ) => {
     const ax = anchorAbsX - winOrigin.x
     const ay = anchorAbsY - winOrigin.y
@@ -967,72 +1610,87 @@ export default function Lens() {
     if (targetX + READY_W > vw - 16) targetX = vw - READY_W - 16
 
     // translate 模式截完直接进 translating；chat 模式进 ready 等用户提问
-    const targetStage: Stage = mode === 'translate' ? 'translating' : 'ready'
+    const targetStage: Stage = activeMode === 'translate' ? 'translating' : 'ready'
+    const targetHeight = targetStage === 'translating'
+      ? READY_BAR_H + FLOATING_GAP + ANSWER_H
+      : READY_BAR_H
+
+    return {
+      localX: Math.round(targetX),
+      localY: Math.round(targetY),
+      windowX: Math.round(winOrigin.x + targetX),
+      windowY: Math.round(winOrigin.y + targetY),
+      width: READY_W,
+      height: targetHeight,
+      stage: targetStage,
+    }
+  }
+
+  /** 截图后 lens 默认模式：在前端直接算 bar 位置，让对话栏飞到选区左/右侧（不再上下出现）。
+   *  优先右侧，右侧空间不够再放左侧；都不够时贴大空间一侧。垂直与选区中心对齐并 clamp 在 viewport 内。 */
+  const flyBarToAnchor = async (
+    anchorAbsX: number,
+    anchorAbsY: number,
+    anchorW: number,
+    anchorH: number,
+    label: string,
+  ) => {
+    const target = resolveFloatingAnchor(anchorAbsX, anchorAbsY, anchorW, anchorH)
+    const targetX = target.localX
+    const targetY = target.localY
+    const READY_W = target.width
+    const targetStage = target.stage
 
     if (!keepFullscreen) {
-      // 浮动模式：从 capture 瞬间起，"缩窗"和 chat 模式的"bar CSS 飞到 (0,0)"同步进行。
-      // - chat 模式：bar 从 select 位置 cubic-bezier(0.22,1,0.36,1) lerp 到 (FLOATING_PADDING, FLOATING_PADDING)
-      // - translate 模式：卡片本来就没有"起始位置"(选区阶段不渲染)，不要 fly，否则会随 window 漂移成"伪 fly"。
-      //   所以 mount 时 barIntro=false（透明 + scale-0.92 隐身），window 动画结束后 setBarIntro(true) → CSS 缓动 fade-in。
-      // 关键：raf 驱动 lensSetFloating 与 CSS transition 同 vsync，cubic-bezier 与全屏模式同曲线。
+      // 为避免透明 Tauri 窗口从全屏缩成小浮窗时重建/重排闪烁，这里不再立即切原生浮动窗口。
+      // 视觉上仍然是浮窗飞到截图旁边；载体窗口保持全屏透明，拖动用前端坐标完成。
       fullscreenMetricsRef.current = metrics
-      const floatX = winOrigin.x + targetX - FLOATING_PADDING
-      const floatY = winOrigin.y + targetY - FLOATING_PADDING
-      const floatW = READY_W + FLOATING_PADDING * 2
-      const floatH = targetStage === 'ready'
-        ? READY_BAR_H + FLOATING_PADDING * 2
-        : READY_BAR_H + FLOATING_GAP + metrics.ANSWER_H + FLOATING_PADDING * 2
-      const startX = winOrigin.x
-      const startY = winOrigin.y
-      const startW = window.innerWidth
-      const startH = window.innerHeight
-      const isTranslateMode = mode === 'translate'
+      const nextBarRect = { x: Math.round(targetX), y: Math.round(targetY), width: READY_W }
+      const fromBarRect = barRect
+      if (floatingRebaseTimerRef.current) clearTimeout(floatingRebaseTimerRef.current)
       flushSync(() => {
         setAppLabel(label)
         setFloatingRebased(false)
-        setBarRect({ x: FLOATING_PADDING, y: FLOATING_PADDING, width: READY_W })
-        setStage(targetStage)
-        if (isTranslateMode) {
-          // 卡片 mount 在隐身状态 + 禁用 transition（避免 (selectX,selectY) → (0,0) 的瞬时 left/top 跳动触发动画）
-          setBarIntro(false)
-          setBarNoTransition(true)
-        }
-      })
-      if (isTranslateMode) {
-        // 隔两帧再恢复 transition，让 window 动画结束时 setBarIntro(true) 能走 CSS 缓动 fade-in
-        requestAnimationFrame(() => {
-          requestAnimationFrame(() => setBarNoTransition(false))
+        floatingSizeRef.current = null
+        setBarNoTransition(true)
+        setBarRebaseHidden(false)
+        setBarInFlight(true)
+        setSelectBarCollapsed(false)
+        setBarFlyOffset({
+          x: Math.round(fromBarRect.x - nextBarRect.x),
+          y: Math.round(fromBarRect.y - nextBarRect.y),
         })
-      }
-      if (floatingRebaseTimerRef.current) clearTimeout(floatingRebaseTimerRef.current)
-      const animStart = performance.now()
-      const animateFrame = () => {
-        if (stageRef.current === 'select') return
-        const elapsed = performance.now() - animStart
-        const tLinear = Math.min(elapsed / TRANSITION_MS, 1)
-        // 与全屏模式同款 cubic-bezier(0.22, 1, 0.36, 1) ease-out 缓动，
-        // bar CSS transitionTimingFunction 也用同一条曲线，两者完全同步。
-        const t = cubicBezier(tLinear, 0.22, 1, 0.36, 1)
-        const curX = startX + (floatX - startX) * t
-        const curY = startY + (floatY - startY) * t
-        const curW = startW + (floatW - startW) * t
-        const curH = startH + (floatH - startH) * t
-        void api.lensSetFloating({ x: curX, y: curY, width: curW, height: curH })
-          .catch((err: unknown) => console.error('[lens] lensSetFloating frame failed:', err))
-        if (tLinear < 1) {
-          requestAnimationFrame(animateFrame)
-        } else {
-          setFloatingRebased(true)
-          if (isTranslateMode) setBarIntro(true)
-        }
-      }
-      requestAnimationFrame(animateFrame)
+        setBarRect(nextBarRect)
+        setStage(targetStage)
+      })
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          setBarNoTransition(false)
+          setBarFlyOffset({ x: 0, y: 0 })
+          markBarFlight()
+        })
+      })
     } else {
-      // 全屏模式：保持现有逻辑
+      const nextBarRect = { x: Math.round(targetX), y: Math.round(targetY), width: READY_W }
+      const fromBarRect = barRect
       flushSync(() => {
         setAppLabel(label)
-        setBarRect({ x: Math.round(targetX), y: Math.round(targetY), width: READY_W })
+        setBarNoTransition(true)
+        setBarInFlight(true)
+        setSelectBarCollapsed(false)
+        setBarFlyOffset({
+          x: Math.round(fromBarRect.x - nextBarRect.x),
+          y: Math.round(fromBarRect.y - nextBarRect.y),
+        })
+        setBarRect(nextBarRect)
         setStage(targetStage)
+      })
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          setBarNoTransition(false)
+          setBarFlyOffset({ x: 0, y: 0 })
+          markBarFlight()
+        })
       })
     }
     if (mode === 'chat') {
@@ -1044,10 +1702,18 @@ export default function Lens() {
    *  流式：lens-translate-stream 事件累积 original/translated；done 事件结束并锁定耗时
    *  非流式：API 返回完整结果一次性灌入（也通过事件，后端在两步完成后 emit 一次完整 delta） */
   const runTranslate = useCallback(async (id: string) => {
+    if (translateEditDebounceRef.current) {
+      clearTimeout(translateEditDebounceRef.current)
+      translateEditDebounceRef.current = null
+    }
+    translateEditSeqRef.current++
+    translateOriginalEditedRef.current = false
+    ignoreTranslateStreamRef.current = false
     setTranslateOriginal('')
     setTranslateText('')
     setTranslateError('')
     setTranslateDurationMs(null)
+    setTranslateRetranslating(false)
     translateStartRef.current = Date.now()
     setTranslateNow(Date.now())
     try {
@@ -1072,12 +1738,104 @@ export default function Lens() {
     }
   }, [])
 
+  const handleTranslateOriginalChange = useCallback((value: string) => {
+    const normalizedValue = normalizeEnglishPunctuationSpacing(value)
+    if (normalizedValue === translateOriginal) return
+    if (!ignoreTranslateStreamRef.current) {
+      void api.lensCancelStream().catch(err => console.error('[lens-translate] cancel stream failed:', err))
+    }
+    ignoreTranslateStreamRef.current = true
+    translateOriginalEditedRef.current = true
+    translateEditSeqRef.current++
+    if (translateEditDebounceRef.current) {
+      clearTimeout(translateEditDebounceRef.current)
+      translateEditDebounceRef.current = null
+    }
+    setTranslateOriginal(normalizedValue)
+    setTranslateText('')
+    setTranslateError('')
+    setTranslateDurationMs(null)
+    setTranslateRetranslating(true)
+    translateStartRef.current = Date.now()
+    setTranslateNow(Date.now())
+    setStage('translating')
+  }, [translateOriginal])
+
+  useEffect(() => {
+    if (!translateOriginalEditedRef.current) return
+    if (!showTranslateOriginal) return
+    if (modeRef.current !== 'translate') return
+    if (stageRef.current !== 'translating' && stageRef.current !== 'translated') return
+
+    if (translateEditDebounceRef.current) {
+      clearTimeout(translateEditDebounceRef.current)
+      translateEditDebounceRef.current = null
+    }
+
+    const source = translateOriginal.trim()
+    if (!source) {
+      translateEditSeqRef.current++
+      setTranslateText('')
+      setTranslateError('')
+      setTranslateDurationMs(null)
+      setTranslateRetranslating(false)
+      translateStartRef.current = null
+      setStage('translated')
+      return
+    }
+
+    const seq = ++translateEditSeqRef.current
+    setTranslateRetranslating(true)
+    const timer = window.setTimeout(() => {
+      translateEditDebounceRef.current = null
+      translateStartRef.current = Date.now()
+      setTranslateNow(Date.now())
+      void (async () => {
+        try {
+          const result = await api.lensTranslateText(source)
+          if (seq === translateEditSeqRef.current) {
+            if (result.success) {
+              setTranslateError('')
+              setTranslateText(normalizeEnglishPunctuationSpacing(result.translated || ''))
+            } else {
+              setTranslateError(result.error || 'Failed')
+              setTranslateText('')
+            }
+          }
+        } catch (err) {
+          if (seq === translateEditSeqRef.current) {
+            setTranslateError(err instanceof Error ? err.message : String(err))
+            setTranslateText('')
+          }
+        } finally {
+          if (seq === translateEditSeqRef.current) {
+            if (translateStartRef.current !== null) {
+              setTranslateDurationMs(Date.now() - translateStartRef.current)
+              translateStartRef.current = null
+            }
+            setTranslateRetranslating(false)
+            setStage('translated')
+          }
+        }
+      })()
+    }, 800)
+    translateEditDebounceRef.current = timer
+
+    return () => {
+      if (translateEditDebounceRef.current === timer) {
+        translateEditDebounceRef.current = null
+      }
+      clearTimeout(timer)
+    }
+  }, [showTranslateOriginal, translateOriginal])
+
   // lens-translate-stream 事件监听（与 lens-stream 同款 cancelled 旗标处理 StrictMode 双挂）
   useEffect(() => {
     let cancelled = false
     let unlisten: (() => void) | undefined
     api.onLensTranslateStream((payload: LensTranslateStreamPayload) => {
       if (payload.imageId !== imageIdRef.current) return
+      if (ignoreTranslateStreamRef.current) return
       if (payload.done) {
         if (payload.error) setTranslateError(payload.error)
         if (translateStartRef.current !== null) {
@@ -1089,9 +1847,9 @@ export default function Lens() {
       }
       if (!payload.delta) return
       if (payload.kind === 'original') {
-        setTranslateOriginal(prev => prev + payload.delta)
+        setTranslateOriginal(prev => normalizeEnglishPunctuationSpacing(prev + payload.delta))
       } else if (payload.kind === 'translated') {
-        setTranslateText(prev => prev + payload.delta)
+        setTranslateText(prev => normalizeEnglishPunctuationSpacing(prev + payload.delta))
       }
     }).then((dispose) => {
       if (cancelled) dispose()
@@ -1117,20 +1875,32 @@ export default function Lens() {
       const result = await api.lensCaptureWindow(info.id)
       if (!result.success || !result.imageId) {
         console.error('lensCaptureWindow failed:', result.error)
-        void enterSelect()
+        const fallbackRect = {
+          x: info.x - winOrigin.x,
+          y: info.y - winOrigin.y,
+          width: info.width,
+          height: info.height,
+        }
+        if (fallbackRect.width >= 10 && fallbackRect.height >= 10) {
+          await handleCaptureRegion(fallbackRect, info.owner)
+        } else {
+          void enterSelect()
+        }
         return
       }
       const newId = result.imageId
-      imageIdRef.current = newId
-
-      // 记录截图框（webview 内坐标）作为已截视觉标记，截完保留显示
-      setCapturedFrame({
+      const frame = {
         x: info.x - winOrigin.x,
         y: info.y - winOrigin.y,
         width: info.width,
         height: info.height,
         label: info.owner,
-      })
+      }
+
+      imageIdRef.current = newId
+
+      // 记录截图框（webview 内坐标）作为已截视觉标记，截完保留显示
+      setCapturedFrame(frame)
       void (async () => {
         try {
           const img = await api.explainReadImage(newId)
@@ -1147,7 +1917,7 @@ export default function Lens() {
     }
   }
 
-  const handleCaptureRegion = async (rect: { x: number; y: number; width: number; height: number }) => {
+  const handleCaptureRegion = async (rect: Rect, label = '') => {
     const gp = clientToGlobal({ x: rect.x, y: rect.y })
     const params = {
       absoluteX: Math.round(gp.x),
@@ -1168,22 +1938,24 @@ export default function Lens() {
         return
       }
       const newId = result.imageId
-      imageIdRef.current = newId
-
-      setCapturedFrame({
+      const frame = {
         x: params.x,
         y: params.y,
         width: params.width,
         height: params.height,
-        label: '',
-      })
+        label,
+      }
+
+      imageIdRef.current = newId
+
+      setCapturedFrame(frame)
       void (async () => {
         try {
           const img = await api.explainReadImage(newId)
           if (img.success) setImagePreview(img.data ?? '')
         } catch (err) { console.error(err) }
       })()
-      await flyBarToAnchor(params.absoluteX, params.absoluteY, params.width, params.height, '')
+      await flyBarToAnchor(params.absoluteX, params.absoluteY, params.width, params.height, label)
       if (mode === 'translate') void runTranslate(newId)
     } finally {
       capturingRef.current = false
@@ -1202,7 +1974,10 @@ export default function Lens() {
       setDragStart(null)
       setDragCurrent(null)
       setDragging(false)
-      if (w < 10 || h < 10) return
+      if (w < 10 || h < 10) {
+        setSelectBarCollapsed(false)
+        return
+      }
       await handleCaptureRegion({ x, y, width: w, height: h })
       return
     }
@@ -1210,14 +1985,24 @@ export default function Lens() {
     setDragStart(null)
     setDragCurrent(null)
     setDragging(false)
+    setSelectBarCollapsed(false)
     if (hovered) {
       await handleCaptureWindow(hovered)
     }
   }
 
   const handleSend = async () => {
-    if (!input.trim() || streaming) return
+    if (streaming) return
     const question = input.trim()
+    const allowBlankImageAnalysis = (
+      !question
+      && mode === 'chat'
+      && stageRef.current === 'ready'
+      && messages.length === 0
+      && !!imageIdRef.current
+    )
+    if (!question && !allowBlankImageAnalysis) return
+    const effectiveQuestion = question || defaultImageAnalysisQuestion(lang)
     setHistoryOpen(false)
     setInput('')
 
@@ -1226,9 +2011,9 @@ export default function Lens() {
     const ctx = (isFirstTurn && mode === 'chat') ? selectionText.trim() : ''
     const userContent = ctx
       ? (lang === 'zh'
-          ? `[已选文本]\n${ctx}\n\n[用户问题]\n${question}`
-          : `[Selected Text]\n${ctx}\n\n[Question]\n${question}`)
-      : question
+          ? `[已选文本]\n${ctx}\n\n[用户问题]\n${effectiveQuestion}`
+          : `[Selected Text]\n${ctx}\n\n[Question]\n${effectiveQuestion}`)
+      : effectiveQuestion
     const userMsg: ExplainMessage = { role: 'user', content: userContent }
     const placeholder: ExplainMessage = { role: 'assistant', content: '' }
     const sendMessages: ExplainMessage[] = [...messages, userMsg]
@@ -1305,15 +2090,77 @@ export default function Lens() {
     setStreaming(false)
   }
 
+  const copyTextWithFeedback = async (text: string, target: CopyTarget) => {
+    if (!text.trim()) return
+    const ok = await copyToClipboard(text)
+    if (!ok) return
+    setCopiedTarget(target)
+    if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current)
+    copyTimeoutRef.current = setTimeout(() => setCopiedTarget(null), 2000)
+  }
+
+  const playSpeechDataUrl = useCallback((dataUrl: string, seq: number) => {
+    return new Promise<void>((resolve, reject) => {
+      if (speechSeqRef.current !== seq) {
+        resolve()
+        return
+      }
+      const audio = new Audio(dataUrl)
+      speechAudioRef.current = audio
+      audio.onended = () => {
+        if (speechAudioRef.current === audio) speechAudioRef.current = null
+        resolve()
+      }
+      audio.onpause = () => {
+        if (!audio.ended) resolve()
+      }
+      audio.onerror = () => {
+        if (speechAudioRef.current === audio) speechAudioRef.current = null
+        reject(new Error('Audio playback failed'))
+      }
+      audio.play().catch(reject)
+    })
+  }, [])
+
+  const speakText = useCallback(async (text: string, target: SpeechTarget) => {
+    if (!text.trim()) return
+    const isCurrentTarget = speakingTarget === target || speechLoadingTarget === target
+    stopSpeechPlayback()
+    if (isCurrentTarget) return
+
+    const seq = speechSeqRef.current
+    const chunks = splitSpeechText(text)
+    if (!chunks.length) return
+    setSpeechLoadingTarget(target)
+
+    try {
+      for (const chunk of chunks) {
+        if (speechSeqRef.current !== seq) return
+        const result = await api.synthesizeSpeech(chunk)
+        if (speechSeqRef.current !== seq) return
+        if (!result.success || !result.data) {
+          throw new Error(result.error || 'Speech synthesis failed')
+        }
+        setSpeechLoadingTarget(null)
+        setSpeakingTarget(target)
+        await playSpeechDataUrl(result.data, seq)
+      }
+    } catch (err) {
+      console.error('Speech playback failed:', err)
+    } finally {
+      if (speechSeqRef.current === seq) {
+        speechAudioRef.current = null
+        setSpeechLoadingTarget(null)
+        setSpeakingTarget(null)
+      }
+    }
+  }, [playSpeechDataUrl, speakingTarget, speechLoadingTarget, stopSpeechPlayback])
+
   const handleCopy = async () => {
     // 复制最后一条 assistant 消息
     const lastAssistant = [...messages].reverse().find(m => m.role === 'assistant' && m.content)
     if (!lastAssistant) return
-    const ok = await copyToClipboard(lastAssistant.content)
-    if (!ok) return
-    setCopied(true)
-    if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current)
-    copyTimeoutRef.current = setTimeout(() => setCopied(false), 2000)
+    await copyTextWithFeedback(lastAssistant.content, 'answer')
   }
 
   // 点击历史项：把当前会话恢复到该 item（image / appLabel / messages / capturedFrame）
@@ -1327,6 +2174,7 @@ export default function Lens() {
     // 防御：恢复历史 setMessages 会触发持久化 effect，但本路径不是"流刚结束"，不该 push 重复条目
     justFinishedStreamRef.current = false
     flushSync(() => {
+      setScreenSnapshot('')
       setImagePreview(item.imagePreview)
       setAppLabel(item.appLabel)
       setInput('')
@@ -1334,6 +2182,10 @@ export default function Lens() {
       setMessages(item.messages)
       setCapturedFrame(item.capturedFrame)
       setStreaming(false)
+      setBarFlyOffset({ x: 0, y: 0 })
+      setBarRebaseHidden(false)
+      setBarInFlight(false)
+      setSelectBarCollapsed(false)
       setStage('answering')
     })
     // 老 takeLensSelection promise 失效，避免恢复历史后被新 take 文本污染
@@ -1355,8 +2207,13 @@ export default function Lens() {
   useEffect(() => () => {
     if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current)
     if (floatingRebaseTimerRef.current) clearTimeout(floatingRebaseTimerRef.current)
+    if (barFlightTimerRef.current) clearTimeout(barFlightTimerRef.current)
+    if (translateEditDebounceRef.current) clearTimeout(translateEditDebounceRef.current)
+    translateEditSeqRef.current++
+    stopSpeechPlayback()
     focusReqIdRef.current++
-  }, [])
+    setLensCursorPassthrough(false)
+  }, [setLensCursorPassthrough, stopSpeechPlayback])
 
   // 点击 history 面板外部 → 关闭
   useEffect(() => {
@@ -1373,14 +2230,17 @@ export default function Lens() {
   // ====== 单一渲染 ======
   const showThumb = stage !== 'select' && (imagePreview || appLabel)
   // 流式期间禁止发送/输入，答完之后可对同一张截图继续问新问题（每次仍为独立 Q&A，自动入历史）
-  const sendDisabled = !input.trim() || streaming
+  const canSendBlankImageAnalysis = mode === 'chat' && stage === 'ready' && messages.length === 0 && capturedFrame !== null
+  const sendDisabled = streaming || (!input.trim() && !canSendBlankImageAnalysis)
   // 对话栏（输入框）只在 chat 模式显示；translate 模式只渲染浮动结果卡片
   const showBar = mode === 'chat'
+  const hideSelectBar = mode === 'chat' && stage === 'select' && selectBarCollapsed
   // translate 浮动卡片：截图后在选区旁出现，加载/完成两态
   const showTranslateCard = mode === 'translate' && (stage === 'translating' || stage === 'translated')
-  // 浮动布局生效条件：用户关了"保持全屏覆盖" 且 已经真的截过图（窗口被缩成浮动模式）。
+  // 浮动布局生效条件：原生窗口已经真的缩成浮动模式。
   // 没截图就直接提问的场景下，window 还是全屏 overlay、bar 还在底部居中，此时仍按全屏布局走。
-  const isFloatingLayout = !keepFullscreen && capturedFrame !== null && stage !== 'select'
+  const isFloatingLayout = floatingRebased && capturedFrame !== null && stage !== 'select'
+  const showScreenSnapshotBackdrop = !!screenSnapshot && stage === 'select'
   const stableAnswerHeight = isFloatingLayout
     ? fullscreenMetricsRef.current?.ANSWER_H || metrics.ANSWER_H
     : metrics.ANSWER_H
@@ -1404,9 +2264,287 @@ export default function Lens() {
     return { placeAbove: false, height: Math.max(180, spaceBelow) }
   }, [barRect, isFloatingLayout, stableAnswerHeight, viewport.h])
 
+  const historyDropdownLayout = useMemo(() => {
+    if (isFloatingLayout) {
+      return { openBelow: true, maxHeight: HISTORY_PANEL_MAX_H }
+    }
+    const buttonTop = barRect.y + (READY_BAR_H - HISTORY_BUTTON_ESTIMATED_H) / 2
+    const buttonBottom = buttonTop + HISTORY_BUTTON_ESTIMATED_H
+    const viewportPadding = 8
+    const spaceAbove = Math.max(0, buttonTop - HISTORY_PANEL_GAP - viewportPadding)
+    const spaceBelow = Math.max(0, viewport.h - buttonBottom - HISTORY_PANEL_GAP - viewportPadding)
+    const openBelow = spaceAbove < HISTORY_PANEL_MAX_H && spaceBelow > spaceAbove
+    const available = Math.max(HISTORY_PANEL_MIN_H, openBelow ? spaceBelow : spaceAbove)
+
+    return {
+      openBelow,
+      maxHeight: Math.min(HISTORY_PANEL_MAX_H, Math.floor(available)),
+    }
+  }, [barRect.y, isFloatingLayout, viewport.h])
+
+  // 截图后为了避免原生窗口缩放闪烁，Lens 仍由一个全屏透明窗口承载。
+  // 此时必须让悬浮窗之外的区域鼠标穿透，否则透明窗口会挡住桌面。
+  const passThroughOverlay = capturedFrame !== null && stage !== 'select' && !floatingRebased && !barRebaseHidden
+  const passThroughPanelRect = useMemo<Rect | null>(() => {
+    if (!passThroughOverlay) return null
+
+    let x = barRect.x
+    let y = barRect.y
+    let width = barRect.width
+    let height = READY_BAR_H
+
+    if (mode === 'chat' && stage === 'answering') {
+      const answerHeight = FLOATING_GAP + answerLayout.height
+      if (answerLayout.placeAbove) {
+        y -= answerHeight
+      }
+      height += answerHeight
+    } else if (mode === 'translate' && (stage === 'translating' || stage === 'translated')) {
+      height = !keepFullscreen
+        ? READY_BAR_H + 8 + stableAnswerHeight
+        : Math.min(viewport.h - 32, READY_BAR_H + 8 + stableAnswerHeight)
+    }
+
+    if (historyOpen && mode === 'chat') {
+      const buttonRect = historyPanelRef.current?.getBoundingClientRect()
+      const historyRight = buttonRect?.right ?? (barRect.x + barRect.width)
+      const historyX = Math.max(
+        8,
+        Math.min(viewport.w - HISTORY_PANEL_W - 8, historyRight - HISTORY_PANEL_W),
+      )
+      const historyH = historyDropdownLayout.maxHeight
+      const historyY = historyDropdownLayout.openBelow
+        ? Math.min(viewport.h - historyH - 8, barRect.y + READY_BAR_H + HISTORY_PANEL_GAP)
+        : Math.max(8, barRect.y - HISTORY_PANEL_GAP - historyH)
+      const left = Math.min(x, historyX)
+      const top = Math.min(y, historyY)
+      const right = Math.max(x + width, historyX + HISTORY_PANEL_W)
+      const bottom = Math.max(y + height, historyY + historyH)
+      x = left
+      y = top
+      width = right - left
+      height = bottom - top
+    }
+
+    if (drawMode && capturedFrame) {
+      const left = Math.min(x, capturedFrame.x)
+      const top = Math.min(y, capturedFrame.y)
+      const right = Math.max(x + width, capturedFrame.x + capturedFrame.width)
+      const bottom = Math.max(y + height, capturedFrame.y + capturedFrame.height)
+      x = left
+      y = top
+      width = right - left
+      height = bottom - top
+    }
+
+    const margin = HIT_REGION_MARGIN
+    return {
+      x: x - margin,
+      y: y - margin,
+      width: width + margin * 2,
+      height: height + margin * 2,
+    }
+  }, [
+    answerLayout,
+    barRect,
+    capturedFrame,
+    drawMode,
+    historyDropdownLayout,
+    historyOpen,
+    keepFullscreen,
+    mode,
+    passThroughOverlay,
+    stableAnswerHeight,
+    stage,
+    viewport.w,
+    viewport.h,
+  ])
+
+  const updateHitRegionRect = useCallback(() => {
+    if (!passThroughOverlay) {
+      setHitRegionRect(prev => (prev ? null : prev))
+      return
+    }
+
+    const rects: Rect[] = []
+    const addElementRect = (el: HTMLElement | null) => {
+      if (!el) return
+      const rect = domRectToRect(el.getBoundingClientRect())
+      if (rect) rects.push(rect)
+    }
+
+    if (showBar) {
+      addElementRect(barPanelRef.current)
+      if (stage === 'answering') addElementRect(answerPanelRef.current)
+      if (historyOpen) {
+        addElementRect(historyPanelRef.current)
+        addElementRect(historyDropdownRef.current)
+      }
+    }
+    if (showTranslateCard) addElementRect(translateCardRef.current)
+    if (drawMode && capturedFrame) rects.push(capturedFrame)
+
+    const union = unionRects(rects)
+    const next = clampRect(union ? inflateRect(union, HIT_REGION_MARGIN) : null, viewport)
+    setHitRegionRect(prev => (rectEquals(prev, next) ? prev : next))
+  }, [
+    capturedFrame,
+    drawMode,
+    historyOpen,
+    passThroughOverlay,
+    showBar,
+    showTranslateCard,
+    stage,
+    viewport,
+  ])
+
+  useLayoutEffect(() => {
+    updateHitRegionRect()
+  }, [
+    updateHitRegionRect,
+    answerLayout,
+    barInFlight,
+    barFlyOffset,
+    barIntro,
+    barRect,
+    messages,
+    stableAnswerHeight,
+    streaming,
+    translateError,
+    translateOriginal,
+    translateRetranslating,
+    translateText,
+  ])
+
+  useEffect(() => {
+    if (!passThroughOverlay) return
+    const observed = [
+      barPanelRef.current,
+      answerPanelRef.current,
+      translateCardRef.current,
+      historyPanelRef.current,
+      historyDropdownRef.current,
+    ].filter((el): el is HTMLDivElement => el !== null)
+    if (observed.length === 0 || typeof ResizeObserver === 'undefined') return
+
+    const observer = new ResizeObserver(() => updateHitRegionRect())
+    observed.forEach(el => observer.observe(el))
+    return () => observer.disconnect()
+  }, [
+    passThroughOverlay,
+    showBar,
+    showTranslateCard,
+    stage,
+    historyOpen,
+    updateHitRegionRect,
+  ])
+
+  const activePassThroughRect = useMemo<Rect | null>(() => {
+    if (!passThroughOverlay) return null
+    const rects = [hitRegionRect, passThroughPanelRect].filter((rect): rect is Rect => rect !== null)
+    const union = unionRects(rects)
+    return union ? clampRect(union, viewport) : null
+  }, [
+    hitRegionRect,
+    passThroughOverlay,
+    passThroughPanelRect,
+    viewport,
+  ])
+
+  useEffect(() => {
+    let cancelled = false
+    const rect = activePassThroughRect
+    if (!passThroughOverlay || !rect) {
+      setNativeHitRegionActive(false)
+      void api.lensSetHitRegion(null).catch(err => console.error('[lens-floating] clear hit region failed:', err))
+      return
+    }
+
+    void api.lensSetHitRegion(rect)
+      .then((active) => {
+        if (cancelled) return
+        setNativeHitRegionActive(active)
+        if (active) setLensCursorPassthrough(false)
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setNativeHitRegionActive(false)
+          console.error('[lens-floating] hit region failed:', err)
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [
+    activePassThroughRect,
+    passThroughOverlay,
+    setLensCursorPassthrough,
+  ])
+
+  useEffect(() => {
+    if (nativeHitRegionActive) {
+      setLensCursorPassthrough(false)
+      return
+    }
+    if (!passThroughOverlay || !activePassThroughRect) {
+      setLensCursorPassthrough(false)
+      return
+    }
+
+    let cancelled = false
+    let busy = false
+    const insidePanel = (point: Point) => (
+      point.x >= activePassThroughRect.x
+      && point.x <= activePassThroughRect.x + activePassThroughRect.width
+      && point.y >= activePassThroughRect.y
+      && point.y <= activePassThroughRect.y + activePassThroughRect.height
+    )
+
+    const tick = async () => {
+      if (busy) return
+      busy = true
+      try {
+        if (panelDraggingRef.current) {
+          setLensCursorPassthrough(false)
+          return
+        }
+        const cursor = await api.lensCursorPosition()
+        if (cancelled) return
+        if (!cursor) {
+          setLensCursorPassthrough(false)
+          return
+        }
+        const localPoint = { x: cursor.x - winOrigin.x, y: cursor.y - winOrigin.y }
+        setLensCursorPassthrough(!insidePanel(localPoint))
+      } catch (err) {
+        if (!cancelled) {
+          setLensCursorPassthrough(false)
+          console.error('[lens-floating] cursor passthrough polling failed:', err)
+        }
+      } finally {
+        busy = false
+      }
+    }
+
+    void tick()
+    const interval = window.setInterval(() => { void tick() }, 40)
+    return () => {
+      cancelled = true
+      window.clearInterval(interval)
+      setLensCursorPassthrough(false)
+    }
+  }, [
+    activePassThroughRect,
+    nativeHitRegionActive,
+    passThroughOverlay,
+    setLensCursorPassthrough,
+    winOrigin.x,
+    winOrigin.y,
+  ])
+
   // 浮动模式下：stage / 布局变化时动态调整窗口尺寸
   useEffect(() => {
-    if (keepFullscreen) return
     if (stage === 'select') return
     if (!floatingRebased) return
 
@@ -1422,9 +2560,79 @@ export default function Lens() {
       h = Math.max(h, READY_BAR_H + FLOATING_GAP + stableAnswerHeight + FLOATING_PADDING * 2)
     }
 
+    if (mode === 'chat' && historyOpen) {
+      h = Math.max(h, READY_BAR_H + HISTORY_PANEL_GAP + historyDropdownLayout.maxHeight + FLOATING_PADDING * 2)
+    }
+
+    const last = floatingSizeRef.current
+    if (last && Math.round(last.width) === Math.round(w) && Math.round(last.height) === Math.round(h)) {
+      return
+    }
+
     // 只更新尺寸，位置不变（不传 x/y）
-    api.lensSetFloating({ width: w, height: h }).catch(err => console.error('[lens-floating] resize failed:', err))
-  }, [stage, answerLayout, barRect, floatingRebased, keepFullscreen, mode, stableAnswerHeight])
+    api.lensSetFloating({ width: w, height: h })
+      .then(() => {
+        floatingSizeRef.current = { width: w, height: h }
+      })
+      .catch(err => console.error('[lens-floating] resize failed:', err))
+  }, [
+    stage,
+    answerLayout,
+    barRect,
+    floatingRebased,
+    historyDropdownLayout.maxHeight,
+    historyOpen,
+    mode,
+    stableAnswerHeight,
+  ])
+
+  const beginFloatingPanelDrag = useCallback((e: React.MouseEvent<HTMLElement>) => {
+    if (e.button !== 0) return
+    if (stageRef.current === 'select' || barRebaseHidden) return
+
+    const target = e.target as HTMLElement | null
+    if (target?.closest('input, textarea, button, a, [contenteditable="true"]')) return
+
+    e.preventDefault()
+    e.stopPropagation()
+
+    if (isFloatingLayout) {
+      if (!floatingRebased) return
+      void api.startDragging().catch(err => console.error('[lens-floating] native drag failed:', err))
+      return
+    }
+
+    const startPoint = { x: e.clientX, y: e.clientY }
+    const startRect = barRect
+    panelDraggingRef.current = true
+    setLensCursorPassthrough(false)
+
+    setBarNoTransition(true)
+    setBarFlyOffset({ x: 0, y: 0 })
+
+    const onMove = (ev: MouseEvent) => {
+      ev.preventDefault()
+      const nextX = startRect.x + ev.clientX - startPoint.x
+      const nextY = startRect.y + ev.clientY - startPoint.y
+      setBarRect(prev => ({ ...prev, x: Math.round(nextX), y: Math.round(nextY) }))
+    }
+
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove, true)
+      window.removeEventListener('mouseup', onUp, true)
+      panelDraggingRef.current = false
+      requestAnimationFrame(() => setBarNoTransition(false))
+    }
+
+    window.addEventListener('mousemove', onMove, { capture: true, passive: false })
+    window.addEventListener('mouseup', onUp, true)
+  }, [
+    barRebaseHidden,
+    barRect,
+    floatingRebased,
+    isFloatingLayout,
+    setLensCursorPassthrough,
+  ])
 
   return (
     <div
@@ -1433,47 +2641,92 @@ export default function Lens() {
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
       data-tauri-drag-region="false"
+      style={{
+        cursor: stage === 'select' ? 'crosshair' : undefined,
+        backgroundColor: showScreenSnapshotBackdrop ? '#000' : undefined,
+      }}
     >
-      {/* select 态全屏覆盖层：完全透明，仅用于捕获鼠标事件，不再加黑色蒙层 */}
-      <div
-        className="absolute inset-0 transition-opacity ease-out pointer-events-none"
-        style={{
-          backgroundColor: 'transparent',
-          transitionDuration: `${TRANSITION_MS}ms`,
-          opacity: stage === 'select' && !hoverRect && !dragRect ? 1 : 0,
-        }}
-      />
-
-      {/* 已截图框：截完保留显示作为视觉标记（橙色边框 + 浅外发光，无挖洞遮罩） */}
-      {/* 浮动模式下不显示高亮框 */}
-      {capturedFrame && stage !== 'select' && keepFullscreen && (
-        <>
-          <div
-            className="absolute border-[2px] border-[#D97757] rounded-md pointer-events-none"
-            style={{
-              left: capturedFrame.x,
-              top: capturedFrame.y,
-              width: capturedFrame.width,
-              height: capturedFrame.height,
-              boxShadow: '0 0 16px 2px rgba(217,119,87,0.45)',
-            }}
-          />
-          {capturedFrame.label && (
+      {showScreenSnapshotBackdrop && (
+        <img
+          src={screenSnapshot}
+          alt=""
+          draggable={false}
+          className="absolute inset-0 w-full h-full object-fill pointer-events-none"
+        />
+      )}
+      {/* select 态遮罩：按 TrOCR/ShareX 的灰幕强度变暗；拖拽选区内保持清晰，hover 只画边框。 */}
+      {stage === 'select' && (
+        <div className="absolute inset-0 pointer-events-none">
+          {!selectFocusRect ? (
             <div
-              className="absolute -translate-y-full pl-2 pr-2.5 py-1 rounded-md bg-neutral-900/95 text-white text-[12px] font-medium whitespace-nowrap shadow-lg pointer-events-none border-l-2 border-[#D97757]"
+              className="absolute inset-0 transition-opacity ease-out"
               style={{
-                left: Math.max(8, capturedFrame.x),
-                top: Math.max(28, capturedFrame.y - 8),
+                backgroundColor: SELECT_MASK_COLOR,
+                transitionDuration: `${TRANSITION_MS}ms`,
               }}
-            >
-              {t.lensScreenshotOf} {capturedFrame.label}
-            </div>
+            />
+          ) : (
+            <>
+              <div
+                className="absolute"
+                style={{
+                  left: 0,
+                  top: 0,
+                  width: viewport.w,
+                  height: selectFocusRect.y,
+                  backgroundColor: SELECT_MASK_COLOR,
+                }}
+              />
+              <div
+                className="absolute"
+                style={{
+                  left: 0,
+                  top: selectFocusRect.y,
+                  width: selectFocusRect.x,
+                  height: selectFocusRect.height,
+                  backgroundColor: SELECT_MASK_COLOR,
+                }}
+              />
+              <div
+                className="absolute"
+                style={{
+                  left: selectFocusRect.x + selectFocusRect.width,
+                  top: selectFocusRect.y,
+                  width: viewport.w - (selectFocusRect.x + selectFocusRect.width),
+                  height: selectFocusRect.height,
+                  backgroundColor: SELECT_MASK_COLOR,
+                }}
+              />
+              <div
+                className="absolute"
+                style={{
+                  left: 0,
+                  top: selectFocusRect.y + selectFocusRect.height,
+                  width: viewport.w,
+                  height: viewport.h - (selectFocusRect.y + selectFocusRect.height),
+                  backgroundColor: SELECT_MASK_COLOR,
+                }}
+              />
+            </>
           )}
+        </div>
+      )}
+
+      {/* 已截图框：沿用 TrOCR/ShareX 黑实线 + 白色流动虚线边框。 */}
+      {/* 浮动模式下不显示高亮框 */}
+      {capturedFrame && stage !== 'select' && keepFullscreen && !floatingRebased && (
+        <>
+          <ShareXSelectionFrame rect={capturedFrame} />
+          <ShareXInfoLabel
+            rect={capturedFrame}
+            text={`X: ${Math.round(winOrigin.x + capturedFrame.x)}, Y: ${Math.round(winOrigin.y + capturedFrame.y)}, ${Math.round(capturedFrame.width)} x ${Math.round(capturedFrame.height)}`}
+            viewport={viewport}
+          />
         </>
       )}
 
       {/* drawMode 关闭时也持续显示已落下的箭头 */}
-      {capturedFrame && stage === 'ready' && keepFullscreen && !drawMode && arrows.length > 0 && (
+      {capturedFrame && stage === 'ready' && keepFullscreen && !floatingRebased && !drawMode && arrows.length > 0 && (
         <svg
           className="absolute pointer-events-none"
           style={{
@@ -1495,7 +2748,7 @@ export default function Lens() {
 
       {/* drawMode:在 capturedFrame 矩形内画箭头.透明 div 收事件、SVG 渲染,
           不加 dim、不再贴 imagePreview 背景,直接显示原画面 */}
-      {capturedFrame && stage === 'ready' && keepFullscreen && drawMode && (
+      {capturedFrame && stage === 'ready' && keepFullscreen && !floatingRebased && drawMode && (
         <div
           className="absolute"
           style={{
@@ -1555,45 +2808,14 @@ export default function Lens() {
         </div>
       )}
 
-      {/* select-only：hover 高亮 / drag 选区 / 顶部 hint */}
+      {/* select-only：TrOCR/ShareX 风格自动窗口框和拖拽选区。 */}
       {stage === 'select' && (
         <>
-          {hoverRect && (
+          {selectFrameRect && (
             <>
-              <div
-                className="absolute border-[2px] border-[#D97757] rounded-md pointer-events-none"
-                style={{
-                  left: hoverRect.x,
-                  top: hoverRect.y,
-                  width: hoverRect.width,
-                  height: hoverRect.height,
-                  boxShadow: '0 0 16px 2px rgba(217,119,87,0.45)',
-                }}
-              />
-              {hovered && (
-                <div
-                  className="absolute -translate-y-full pl-2 pr-2.5 py-1 rounded-md bg-neutral-900/95 text-white text-[12px] font-medium whitespace-nowrap shadow-lg pointer-events-none border-l-2 border-[#D97757]"
-                  style={{
-                    left: Math.max(8, hoverRect.x),
-                    top: Math.max(28, hoverRect.y - 8),
-                  }}
-                >
-                  {t.lensScreenshotOf} {hovered.owner}
-                </div>
-              )}
+              <ShareXSelectionFrame rect={selectFrameRect} />
+              <ShareXInfoLabel rect={selectFrameRect} text={selectFrameText} viewport={viewport} />
             </>
-          )}
-          {dragRect && dragging && (
-            <div
-              className="absolute border-[2px] border-[#D97757] rounded-sm pointer-events-none"
-              style={{
-                left: dragRect.x,
-                top: dragRect.y,
-                width: dragRect.width,
-                height: dragRect.height,
-                boxShadow: '0 0 16px 2px rgba(217,119,87,0.45)',
-              }}
-            />
           )}
         </>
       )}
@@ -1604,6 +2826,7 @@ export default function Lens() {
           - answering：在对话栏下方 absolute 展开 answer 区（固定 360 高） */}
       {showBar && (
         <div
+          ref={barPanelRef}
           className="absolute ease-out"
           onMouseDown={(e) => e.stopPropagation()}
           onMouseMove={(e) => e.stopPropagation()}
@@ -1613,16 +2836,20 @@ export default function Lens() {
             left: barRect.x,
             top: barRect.y,
             width: barRect.width,
-            transitionProperty: barNoTransition ? 'none' : 'left, top, width, transform, opacity',
-            transitionDuration: barNoTransition ? '0ms' : `${TRANSITION_MS}ms`,
+            transitionProperty: barNoTransition ? 'none' : 'transform, opacity',
+            transitionDuration: barNoTransition ? '0ms' : `${hideSelectBar ? SELECT_BAR_COLLAPSE_MS : TRANSITION_MS}ms`,
             transitionTimingFunction: 'cubic-bezier(0.22, 1, 0.36, 1)',
-            transform: barIntro ? 'scale(1)' : 'scale(0.92)',
-            opacity: barIntro ? 1 : 0,
+            transform: `translate3d(${barFlyOffset.x}px, ${barFlyOffset.y}px, 0) scale(${barIntro && !hideSelectBar ? 1 : 0.92})`,
+            willChange: 'transform, opacity',
+            opacity: barIntro && !hideSelectBar ? 1 : 0,
+            visibility: barRebaseHidden ? 'hidden' : undefined,
+            pointerEvents: hideSelectBar || barRebaseHidden ? 'none' : undefined,
           }}
         >
           {/* 输入栏卡片 */}
           <div
-            className="flex items-center gap-3 pl-4 pr-2 py-2 rounded-[18px] bg-white dark:bg-neutral-900 shadow-[0_10px_28px_-20px_rgba(0,0,0,0.28)] ring-1 ring-black/[0.04] dark:ring-white/[0.06] cursor-default"
+            className={`flex items-center gap-3 pl-4 pr-2 py-2 rounded-[18px] bg-white dark:bg-neutral-900 shadow-[0_10px_28px_-20px_rgba(0,0,0,0.28)] ring-1 ring-black/[0.04] dark:ring-white/[0.06] ${stage === 'select' ? 'cursor-default' : 'cursor-move'}`}
+            onMouseDown={beginFloatingPanelDrag}
             data-tauri-drag-region="false"
           >
             <div className="shrink-0 flex items-center gap-2">
@@ -1630,7 +2857,7 @@ export default function Lens() {
                 <div className="flex items-center gap-2.5">
                   <div className="w-10 h-10 rounded-xl overflow-hidden ring-1 ring-black/[0.06] dark:ring-white/[0.06] bg-neutral-100 dark:bg-neutral-800 flex items-center justify-center shadow-sm">
                     {imagePreview ? (
-                      <img src={imagePreview} alt="snap" className="w-full h-full object-cover" />
+                      <img src={imagePreview} alt="snap" className="w-full h-full object-cover" draggable={false} />
                     ) : (
                       <ImageIcon size={14} className="text-neutral-400" />
                     )}
@@ -1641,9 +2868,9 @@ export default function Lens() {
                 </div>
               ) : (
                 <img
-                  src="/logo-mark.png"
+                  src="/emojione--leaf-fluttering-in-wind.svg"
                   alt=""
-                  className="w-7 h-7 object-contain dark:invert"
+                  className="w-7 h-7 object-contain"
                   draggable={false}
                 />
               )}
@@ -1655,7 +2882,7 @@ export default function Lens() {
                   {selectionLineCount}
                 </span>
               )}
-              {stage === 'ready' && keepFullscreen && (
+              {stage === 'ready' && keepFullscreen && !floatingRebased && (
                 <button
                   type="button"
                   onClick={() => setDrawMode(m => !m)}
@@ -1667,7 +2894,7 @@ export default function Lens() {
                     drawMode
                       ? 'bg-blue-500 text-white hover:bg-blue-600'
                       : 'text-neutral-600 dark:text-neutral-300 hover:bg-black/[0.05] dark:hover:bg-white/[0.06]'
-                  } ${!imagePreview ? 'opacity-40 cursor-not-allowed' : ''}`}
+                  } ${!imagePreview ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}
                 >
                   <MousePointer2 size={15} strokeWidth={1.75} />
                 </button>
@@ -1688,14 +2915,14 @@ export default function Lens() {
               readOnly={streaming}
               aria-disabled={streaming}
               placeholder={t.lensAskPlaceholder}
-              className={`flex-1 bg-transparent text-[16px] text-neutral-900 dark:text-white placeholder-neutral-500 dark:placeholder-neutral-400 focus:outline-none ${streaming ? 'opacity-60' : ''}`}
+              className={`flex-1 bg-transparent text-[16px] text-neutral-900 dark:text-white placeholder-neutral-500 dark:placeholder-neutral-400 focus:outline-none cursor-text ${streaming ? 'opacity-60' : ''}`}
             />
             {/* History dropdown：按钮 + 弹出面板（容器作为 ref，点击外部关闭） */}
             <div ref={historyPanelRef} className="relative shrink-0">
               <button
                 type="button"
                 onClick={() => setHistoryOpen(o => !o)}
-                className="flex items-center gap-1 h-9 px-2.5 rounded-lg text-neutral-600 dark:text-neutral-300 hover:bg-black/[0.05] dark:hover:bg-white/[0.06] transition-colors"
+                className="flex items-center gap-1 h-9 px-2.5 rounded-lg text-neutral-600 dark:text-neutral-300 hover:bg-black/[0.05] dark:hover:bg-white/[0.06] transition-colors cursor-pointer"
                 title={t.lensHistory}
               >
                 <HistoryIcon size={15} strokeWidth={1.75} />
@@ -1706,9 +2933,13 @@ export default function Lens() {
               </button>
               {historyOpen && (
                 <div
-                  className="absolute right-0 bottom-full mb-2 w-[240px] rounded-xl bg-white dark:bg-neutral-900 shadow-[0_18px_44px_-12px_rgba(0,0,0,0.4)] ring-1 ring-black/[0.06] dark:ring-white/[0.08] overflow-hidden z-50"
+                  ref={historyDropdownRef}
+                  className={`absolute right-0 ${historyDropdownLayout.openBelow ? 'top-full mt-2' : 'bottom-full mb-2'} w-[240px] rounded-xl bg-white dark:bg-neutral-900 shadow-[0_18px_44px_-12px_rgba(0,0,0,0.4)] ring-1 ring-black/[0.06] dark:ring-white/[0.08] overflow-hidden z-50`}
                 >
-                  <div className="max-h-[200px] overflow-y-auto custom-scrollbar py-1">
+                  <div
+                    className="overflow-y-auto custom-scrollbar py-1"
+                    style={{ maxHeight: historyDropdownLayout.maxHeight }}
+                  >
                     {history.length === 0 ? (
                       <div className="px-2.5 py-1.5 text-[11px] text-neutral-400 dark:text-neutral-500">
                         {t.lensNoHistory}
@@ -1733,7 +2964,7 @@ export default function Lens() {
                             key={`${item.id}-${item.timestamp}`}
                             type="button"
                             onClick={() => restoreHistory(item)}
-                            className="w-full flex items-center gap-2 px-2.5 py-1.5 text-left hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors"
+                            className="w-full flex items-center gap-2 px-2.5 py-1.5 text-left hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors cursor-pointer"
                           >
                             <div className="shrink-0 w-6 h-6 rounded overflow-hidden bg-neutral-100 dark:bg-neutral-800 ring-1 ring-black/[0.05] dark:ring-white/[0.06] flex items-center justify-center">
                               {item.imagePreview ? (
@@ -1764,7 +2995,7 @@ export default function Lens() {
               disabled={sendDisabled}
               className={`shrink-0 w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-150 active:scale-95 ${
                 !sendDisabled
-                  ? 'bg-[#D97757] hover:bg-[#C56646] hover:scale-105'
+                  ? 'bg-[#D97757] hover:bg-[#C56646] hover:scale-105 cursor-pointer'
                   : 'bg-neutral-200 dark:bg-neutral-700 cursor-not-allowed'
               }`}
             >
@@ -1773,6 +3004,15 @@ export default function Lens() {
                 strokeWidth={2.25}
                 className={!sendDisabled ? 'text-white' : 'text-neutral-400 dark:text-neutral-500'}
               />
+            </button>
+            <button
+              type="button"
+              onClick={() => void closeLikeEscape()}
+              title={t.shotClose}
+              aria-label={t.shotClose}
+              className="shrink-0 w-9 h-9 rounded-lg flex items-center justify-center text-neutral-500 hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-100 hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors cursor-pointer"
+            >
+              <X size={16} strokeWidth={2} />
             </button>
           </div>
 
@@ -1787,6 +3027,7 @@ export default function Lens() {
 
           {/* answer 区：absolute 展开在对话栏上方或下方（自适应空间），渲染整个 chat list（多轮对话） */}
           <div
+            ref={answerPanelRef}
             className="absolute left-0 right-0 rounded-2xl overflow-hidden window-frosted transition-all ease-out select-text"
             style={{
               top: answerLayout.placeAbove ? undefined : 'calc(100% + 8px)',
@@ -1809,8 +3050,8 @@ export default function Lens() {
                     onClick={() => void handleCopy()}
                     className="flex items-center gap-1 px-2 py-0.5 text-[10px] text-neutral-500 hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-100 rounded hover:bg-black/5 dark:hover:bg-white/10 transition-colors"
                   >
-                    {copied ? <Check size={11} /> : <Copy size={11} />}
-                    <span>{copied ? t.lensCopied : t.lensCopy}</span>
+                    {copiedTarget === 'answer' ? <Check size={11} /> : <Copy size={11} />}
+                    <span>{copiedTarget === 'answer' ? t.lensCopied : t.lensCopy}</span>
                   </button>
                   {streaming && (
                     <button
@@ -1854,7 +3095,7 @@ export default function Lens() {
                           ) : isLast && streaming && !m.reasoning ? (
                             <div className="not-prose flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
                               <Loader2 className="animate-spin" size={14} />
-                              <span className="text-[12px]">{t.lensAsking}</span>
+                              <span className="text-[12px]">{formatLensAsking(t.lensAsking, activeLensModel)}</span>
                             </div>
                           ) : null}
                         </div>
@@ -1875,6 +3116,7 @@ export default function Lens() {
           外层 select-none 用 select-text 覆盖，让用户可选中复制部分文本。 */}
       {showTranslateCard && (
         <div
+          ref={translateCardRef}
           className="absolute ease-out rounded-2xl bg-white dark:bg-neutral-900 shadow-[0_10px_28px_-20px_rgba(0,0,0,0.28)] ring-1 ring-black/[0.04] dark:ring-white/[0.06] overflow-hidden select-text"
           onMouseDown={(e) => e.stopPropagation()}
           onMouseMove={(e) => e.stopPropagation()}
@@ -1884,28 +3126,34 @@ export default function Lens() {
             left: barRect.x,
             top: barRect.y,
             width: barRect.width,
-            maxHeight: !keepFullscreen
+            maxHeight: isFloatingLayout || !keepFullscreen
               ? READY_BAR_H + 8 + stableAnswerHeight
               : Math.min(viewport.h - 32, READY_BAR_H + 8 + stableAnswerHeight),
-            transitionProperty: barNoTransition ? 'none' : 'left, top, width, transform, opacity',
+            transitionProperty: barNoTransition ? 'none' : 'transform, opacity',
             transitionDuration: barNoTransition ? '0ms' : `${TRANSITION_MS}ms`,
             transitionTimingFunction: 'cubic-bezier(0.22, 1, 0.36, 1)',
-            transform: barIntro ? 'scale(1)' : 'scale(0.92)',
+            transform: `translate3d(${barFlyOffset.x}px, ${barFlyOffset.y}px, 0) scale(${barIntro ? 1 : 0.92})`,
+            willChange: 'transform, opacity',
             opacity: barIntro ? 1 : 0,
+            visibility: barRebaseHidden ? 'hidden' : undefined,
           }}
           data-tauri-drag-region="false"
         >
           {/* 顶部缩略图 + 应用名 + 状态徽章（耗时 / token 估算） */}
-          <div className="flex items-center gap-2.5 px-3.5 py-2.5 border-b border-black/[0.05] dark:border-white/[0.06]">
+          <div
+            className="flex items-center gap-2.5 px-3.5 py-2.5 border-b border-black/[0.05] dark:border-white/[0.06] cursor-move"
+            onMouseDown={beginFloatingPanelDrag}
+            data-tauri-drag-region="false"
+          >
             <div className="shrink-0 w-8 h-8 rounded-lg overflow-hidden ring-1 ring-black/[0.06] dark:ring-white/[0.06] bg-neutral-100 dark:bg-neutral-800 flex items-center justify-center">
               {imagePreview ? (
-                <img src={imagePreview} alt="snap" className="w-full h-full object-cover" />
+                <img src={imagePreview} alt="snap" className="w-full h-full object-cover" draggable={false} />
               ) : (
                 <ImageIcon size={12} className="text-neutral-400" />
               )}
             </div>
             <span className="text-[12.5px] font-medium text-neutral-700 dark:text-neutral-300 truncate flex-1">
-              {appLabel || t.lensScreenshotOf.replace('：', '').replace(':', '')}
+              {appLabel || t.tabScreenshot}
             </span>
             {(() => {
               const elapsedMs = stage === 'translating' && translateStartRef.current
@@ -1920,12 +3168,21 @@ export default function Lens() {
                 </span>
               )
             })()}
+            <button
+              type="button"
+              onClick={() => void closeLikeEscape()}
+              title={t.shotClose}
+              aria-label={t.shotClose}
+              className="shrink-0 w-7 h-7 rounded-lg flex items-center justify-center text-neutral-400 hover:text-neutral-700 dark:text-neutral-500 dark:hover:text-neutral-100 hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors cursor-pointer"
+            >
+              <X size={14} strokeWidth={2} />
+            </button>
           </div>
 
           {/* 内容区 */}
           <div className="px-3.5 py-3 overflow-y-auto custom-scrollbar"
             style={{
-              maxHeight: !keepFullscreen
+              maxHeight: isFloatingLayout || !keepFullscreen
                 ? stableAnswerHeight
                 : Math.min(viewport.h - 110, stableAnswerHeight)
             }}>
@@ -1935,13 +3192,102 @@ export default function Lens() {
               </div>
             ) : (
               <>
-                {/* 译文区（主体）：合并模式下分隔符前的所有 delta 都属于这块，先于原文出现 */}
-                {translateText ? (
-                  <div className="prose prose-sm dark:prose-invert max-w-none text-[13.5px] leading-7 text-neutral-800 dark:text-neutral-200">
-                    <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
-                      {translateText}
-                    </ReactMarkdown>
+                {/* OCR 结果：后端 OCR 完成后立即 emit original，先于翻译完成显示在上方。 */}
+                {showTranslateOriginal && (
+                  <div>
+                    <div className="mb-1.5 flex items-center gap-1.5">
+                      <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-neutral-400 dark:text-neutral-500">
+                        {t.shotOriginal}
+                      </span>
+                      {translateOriginal && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => void copyTextWithFeedback(translateOriginal, 'original')}
+                            title={copiedTarget === 'original' ? t.lensCopied : t.lensCopy}
+                            aria-label={copiedTarget === 'original' ? t.lensCopied : t.lensCopy}
+                            className="shrink-0 w-5 h-5 rounded-md flex items-center justify-center text-neutral-400 hover:text-neutral-700 dark:text-neutral-500 dark:hover:text-neutral-100 hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors"
+                          >
+                            {copiedTarget === 'original' ? <Check size={12} /> : <Copy size={12} />}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void speakText(translateOriginal, 'original')}
+                            title={speakingTarget === 'original' ? t.lensStop : t.lensSpeak}
+                            aria-label={speakingTarget === 'original' ? t.lensStop : t.lensSpeak}
+                            className={`shrink-0 w-5 h-5 rounded-md flex items-center justify-center hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors ${
+                              speakingTarget === 'original'
+                                ? 'text-neutral-700 dark:text-neutral-100'
+                                : 'text-neutral-400 hover:text-neutral-700 dark:text-neutral-500 dark:hover:text-neutral-100'
+                            }`}
+                          >
+                            {speechLoadingTarget === 'original'
+                              ? <Loader2 size={12} className="animate-spin" />
+                              : <Play size={12} fill="currentColor" strokeWidth={0} />}
+                          </button>
+                        </>
+                      )}
+                    </div>
+                    {translateOriginal ? (
+                      <EditableOcrText
+                        value={translateOriginal}
+                        onChange={handleTranslateOriginalChange}
+                      />
+                    ) : (
+                      <div className="space-y-2">
+                        <div className="h-3.5 rounded bg-gradient-to-r from-neutral-200 via-neutral-100 to-neutral-200 dark:from-neutral-800 dark:via-neutral-700 dark:to-neutral-800 bg-[length:200%_100%] animate-[shimmer_1.4s_linear_infinite]" />
+                        <div className="h-3.5 rounded bg-gradient-to-r from-neutral-200 via-neutral-100 to-neutral-200 dark:from-neutral-800 dark:via-neutral-700 dark:to-neutral-800 bg-[length:200%_100%] animate-[shimmer_1.4s_linear_infinite] w-[82%]" />
+                      </div>
+                    )}
                   </div>
+                )}
+
+                {showTranslateOriginal && (
+                  <div className="border-t border-black/[0.05] dark:border-white/[0.06] -mx-3.5 my-3" />
+                )}
+
+                {/* 翻译结果：位于 OCR 下方，流式翻译时继续逐段追加。 */}
+                <div className="mb-1.5 flex items-center gap-1.5">
+                  <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-neutral-400 dark:text-neutral-500">
+                    {t.shotTranslated}
+                  </span>
+                  {translateRetranslating && (
+                    <span className="flex items-center gap-1 text-[10.5px] text-neutral-400 dark:text-neutral-500">
+                      <Loader2 size={10} className="animate-spin" />
+                      {t.shotTranslating}
+                    </span>
+                  )}
+                  {translateText && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => void copyTextWithFeedback(translateText, 'translated')}
+                        title={copiedTarget === 'translated' ? t.lensCopied : t.lensCopy}
+                        aria-label={copiedTarget === 'translated' ? t.lensCopied : t.lensCopy}
+                        className="shrink-0 w-5 h-5 rounded-md flex items-center justify-center text-neutral-400 hover:text-neutral-700 dark:text-neutral-500 dark:hover:text-neutral-100 hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors"
+                      >
+                        {copiedTarget === 'translated' ? <Check size={12} /> : <Copy size={12} />}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void speakText(translateText, 'translated')}
+                        title={speakingTarget === 'translated' ? t.lensStop : t.lensSpeak}
+                        aria-label={speakingTarget === 'translated' ? t.lensStop : t.lensSpeak}
+                        className={`shrink-0 w-5 h-5 rounded-md flex items-center justify-center hover:bg-black/[0.05] dark:hover:bg-white/[0.08] transition-colors ${
+                          speakingTarget === 'translated'
+                            ? 'text-neutral-700 dark:text-neutral-100'
+                            : 'text-neutral-400 hover:text-neutral-700 dark:text-neutral-500 dark:hover:text-neutral-100'
+                        }`}
+                      >
+                        {speechLoadingTarget === 'translated'
+                          ? <Loader2 size={12} className="animate-spin" />
+                          : <Play size={12} fill="currentColor" strokeWidth={0} />}
+                      </button>
+                    </>
+                  )}
+                </div>
+                {translateText ? (
+                  <ReadableMarkdownText text={translateText} sourceText={translateOriginal} />
                 ) : (
                   <div className="space-y-2">
                     <div className="h-3.5 rounded bg-gradient-to-r from-neutral-200 via-neutral-100 to-neutral-200 dark:from-neutral-800 dark:via-neutral-700 dark:to-neutral-800 bg-[length:200%_100%] animate-[shimmer_1.4s_linear_infinite]" />
@@ -1949,39 +3295,9 @@ export default function Lens() {
                     <div className="h-3.5 rounded bg-gradient-to-r from-neutral-200 via-neutral-100 to-neutral-200 dark:from-neutral-800 dark:via-neutral-700 dark:to-neutral-800 bg-[length:200%_100%] animate-[shimmer_1.4s_linear_infinite] w-[72%]" />
                   </div>
                 )}
-                {/* 原文区（参考）：分隔符之后的 delta 才到这里，置于译文下方小字灰色 */}
-                {translateOriginal && (
-                  <>
-                    <div className="border-t border-black/[0.05] dark:border-white/[0.06] -mx-3.5 my-3" />
-                    <div className="prose prose-sm dark:prose-invert max-w-none text-[12.5px] leading-6 text-neutral-500 dark:text-neutral-400">
-                      <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
-                        {translateOriginal}
-                      </ReactMarkdown>
-                    </div>
-                  </>
-                )}
               </>
             )}
           </div>
-
-          {/* 底部操作栏：复制译文 */}
-          {stage === 'translated' && translateText && !translateError && (
-            <div className="flex items-center gap-1 px-3 py-1.5 border-t border-black/[0.05] dark:border-white/[0.06]">
-              <button
-                onClick={async () => {
-                  if (await copyToClipboard(translateText)) {
-                    setCopied(true)
-                    if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current)
-                    copyTimeoutRef.current = setTimeout(() => setCopied(false), 2000)
-                  }
-                }}
-                className="flex items-center gap-1 px-2 py-0.5 text-[11px] text-neutral-500 hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-100 rounded hover:bg-black/5 dark:hover:bg-white/10 transition-colors"
-              >
-                {copied ? <Check size={12} /> : <Copy size={12} />}
-                <span>{copied ? t.lensCopied : t.lensCopy}</span>
-              </button>
-            </div>
-          )}
         </div>
       )}
     </div>

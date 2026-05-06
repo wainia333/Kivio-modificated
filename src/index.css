@@ -24,18 +24,18 @@ body {
   background: transparent;
 }
 
-/* 透明窗口外壳：填满 Tauri window，但内边留 16px 给卡片阴影"散开"用。
-   不留这层 padding 的话，box-shadow 会被 window 矩形边缘裁掉 → 四个角无光晕。 */
+/* 透明窗口外壳：填满 Tauri window。
+   这里不能留透明 padding，否则原生透明窗口的空白区域仍会拦截桌面点击。 */
 .window-container {
   margin: 0;
   height: 100%;
   width: 100%;
   background: transparent;
-  padding: 16px;
+  padding: 0;
   box-sizing: border-box;
 }
 
-/* 磨砂玻璃悬浮卡：作为 .window-container 的子元素填满 padding 内区域。
+/* 磨砂玻璃悬浮卡：作为 .window-container 的子元素填满窗口。
    半透明白底 + 大模糊背景 + hairline 描边 + 一道柔和近对称阴影。
    阴影偏置只 2-3px（浮起感而非下坠感），靠 blur 散开整圈光晕。 */
 .window-frosted {
@@ -195,4 +195,96 @@ body {
 
 .animate-lens-frame-fade {
   animation: lens-frame-fade 220ms ease-out both;
+}
+
+/* ShareX/TrOCR 截图选区的 marching ants：5px/5px 白色虚线，约 15px/s 滚动。 */
+@keyframes sharex-marching-ants {
+  from { stroke-dashoffset: 0; }
+  to { stroke-dashoffset: -15; }
+}
+
+.sharex-selection-dash {
+  animation: sharex-marching-ants 1s linear infinite;
+}
+
+/* OCR+翻译浮窗正文：比 Tailwind Typography 默认段落 margin 更紧凑。 */
+.lens-readable-text :where(p) {
+  margin-top: 0;
+  margin-bottom: 0.4em;
+}
+
+.lens-readable-text.lens-readable-cjk :where(p) {
+  margin-bottom: 0.44em;
+}
+
+.lens-readable-text.lens-readable-latin :where(p) {
+  margin-bottom: 0.4em;
+}
+
+.lens-readable-text :where(p:last-child) {
+  margin-bottom: 0;
+}
+
+.translated-readable-block {
+  margin-bottom: 0.4em;
+}
+
+.lens-readable-cjk .translated-readable-block {
+  margin-bottom: 0.44em;
+}
+
+.lens-readable-latin .translated-readable-block {
+  margin-bottom: 0.4em;
+}
+
+.translated-readable-block:last-child {
+  margin-bottom: 0;
+}
+
+.translated-readable-block > :first-child {
+  margin-top: 0;
+}
+
+.translated-readable-block > :last-child {
+  margin-bottom: 0;
+}
+
+.ocr-editable {
+  min-height: 72px;
+  max-height: 192px;
+  overflow-y: auto;
+  cursor: text;
+  border-radius: 8px;
+  padding: 0;
+  transition: background-color 140ms ease, box-shadow 140ms ease;
+}
+
+.ocr-editable:focus,
+.ocr-editable:focus-visible {
+  outline: none;
+  background: rgba(0, 0, 0, 0.018);
+  box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.055);
+}
+
+.dark .ocr-editable:focus,
+.dark .ocr-editable:focus-visible {
+  background: rgba(255, 255, 255, 0.026);
+  box-shadow: 0 0 0 4px rgba(96, 165, 250, 0.08);
+}
+
+.ocr-editable [data-ocr-paragraph] {
+  margin: 0 0 0.4em;
+  min-height: 1.35em;
+}
+
+.ocr-editable.lens-readable-cjk [data-ocr-paragraph] {
+  margin-bottom: 0.44em;
+}
+
+.ocr-editable.lens-readable-latin [data-ocr-paragraph] {
+  margin-bottom: 0.4em;
+}
+
+.ocr-editable [data-ocr-paragraph]:last-child {
+  margin-bottom: 0;
 }

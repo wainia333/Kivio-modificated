@@ -13,7 +13,7 @@ const KEYRING_SERVICE_LEGACY: &str = "com.zmair.keylingo";
  * 生成提供商 API Key 在钥匙串中的条目名称
  */
 fn provider_credential_name(provider_id: &str) -> String {
-  format!("provider:{provider_id}")
+    format!("provider:{provider_id}")
 }
 
 /**
@@ -25,16 +25,20 @@ fn provider_credential_name(provider_id: &str) -> String {
  * 此函数仅在 settings.json 中没有 key 时用一次，迁移完成后旧条目可被清理。
  */
 fn legacy_load_keyring_api_key(provider_id: &str) -> Option<String> {
-  let cred = provider_credential_name(provider_id);
-  for svc in [KEYRING_SERVICE, KEYRING_SERVICE_LEGACY] {
-    let Ok(entry) = keyring::Entry::new(svc, &cred) else { continue };
-    let Ok(raw) = entry.get_password() else { continue };
-    let trimmed = raw.trim().to_string();
-    if !trimmed.is_empty() {
-      return Some(trimmed);
+    let cred = provider_credential_name(provider_id);
+    for svc in [KEYRING_SERVICE, KEYRING_SERVICE_LEGACY] {
+        let Ok(entry) = keyring::Entry::new(svc, &cred) else {
+            continue;
+        };
+        let Ok(raw) = entry.get_password() else {
+            continue;
+        };
+        let trimmed = raw.trim().to_string();
+        if !trimmed.is_empty() {
+            return Some(trimmed);
+        }
     }
-  }
-  None
+    None
 }
 
 /**
@@ -42,12 +46,12 @@ fn legacy_load_keyring_api_key(provider_id: &str) -> Option<String> {
  * 同时清理新旧 service 名下的条目，避免有残留。
  */
 fn legacy_clear_keyring_api_key(provider_id: &str) {
-  let cred = provider_credential_name(provider_id);
-  for svc in [KEYRING_SERVICE, KEYRING_SERVICE_LEGACY] {
-    if let Ok(entry) = keyring::Entry::new(svc, &cred) {
-      let _ = entry.delete_credential();
+    let cred = provider_credential_name(provider_id);
+    for svc in [KEYRING_SERVICE, KEYRING_SERVICE_LEGACY] {
+        if let Ok(entry) = keyring::Entry::new(svc, &cred) {
+            let _ = entry.delete_credential();
+        }
     }
-  }
 }
 
 /**
@@ -60,25 +64,25 @@ fn legacy_clear_keyring_api_key(provider_id: &str) {
  * 标记会随用户下次保存设置写盘；即使没保存就退出，下次再跑也是 no-op（keyring 已被清）。
  */
 fn migrate_legacy_keyring_keys(settings: &mut Settings) {
-  if settings.legacy_keyring_migrated {
-    return;
-  }
-  for provider in &mut settings.providers {
-    if !provider.api_keys.is_empty() {
-      // settings.json 已有 key，无需迁移；顺手清掉钥匙串里的残留
-      legacy_clear_keyring_api_key(&provider.id);
-      continue;
+    if settings.legacy_keyring_migrated {
+        return;
     }
-    if let Some(legacy_key) = legacy_load_keyring_api_key(&provider.id) {
-      provider.api_keys.push(legacy_key);
-      legacy_clear_keyring_api_key(&provider.id);
-      eprintln!(
-        "Migrated legacy keyring API key for provider {} into settings.json",
-        provider.id
-      );
+    for provider in &mut settings.providers {
+        if !provider.api_keys.is_empty() {
+            // settings.json 已有 key，无需迁移；顺手清掉钥匙串里的残留
+            legacy_clear_keyring_api_key(&provider.id);
+            continue;
+        }
+        if let Some(legacy_key) = legacy_load_keyring_api_key(&provider.id) {
+            provider.api_keys.push(legacy_key);
+            legacy_clear_keyring_api_key(&provider.id);
+            eprintln!(
+                "Migrated legacy keyring API key for provider {} into settings.json",
+                provider.id
+            );
+        }
     }
-  }
-  settings.legacy_keyring_migrated = true;
+    settings.legacy_keyring_migrated = true;
 }
 
 // ========== 数据结构定义 ==========
@@ -89,22 +93,22 @@ fn migrate_legacy_keyring_keys(settings: &mut Settings) {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct OpenAIConfig {
-  #[serde(default)]
-  pub api_key: String,
-  #[serde(default = "default_openai_base_url")]
-  pub base_url: String,
-  #[serde(default = "default_openai_model")]
-  pub model: String,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default = "default_openai_base_url")]
+    pub base_url: String,
+    #[serde(default = "default_openai_model")]
+    pub model: String,
 }
 
 impl Default for OpenAIConfig {
-  fn default() -> Self {
-    Self {
-      api_key: "".to_string(),
-      base_url: "https://api.openai.com/v1".to_string(),
-      model: "gpt-4o".to_string(),
+    fn default() -> Self {
+        Self {
+            api_key: "".to_string(),
+            base_url: "https://api.openai.com/v1/responses".to_string(),
+            model: "gpt-4o".to_string(),
+        }
     }
-  }
 }
 
 /**
@@ -119,17 +123,108 @@ impl Default for OpenAIConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelProvider {
-  pub id: String,
-  pub name: String,
-  #[serde(default)]
-  pub api_keys: Vec<String>,
-  #[serde(default, skip_serializing_if = "Option::is_none", rename = "apiKey")]
-  pub api_key_legacy: Option<String>,
-  pub base_url: String,
-  #[serde(default)]
-  pub available_models: Vec<String>,
-  #[serde(default)]
-  pub enabled_models: Vec<String>,
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub api_keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "apiKey")]
+    pub api_key_legacy: Option<String>,
+    pub base_url: String,
+    #[serde(default)]
+    pub available_models: Vec<String>,
+    #[serde(default)]
+    pub enabled_models: Vec<String>,
+}
+
+/**
+ * 百度 OCR 配置。
+ * API Key / Secret Key 对应百度智能云文字识别应用；默认走通用文字识别。
+ */
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct BaiduOcrConfig {
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default)]
+    pub secret_key: String,
+    #[serde(default = "default_baidu_ocr_language")]
+    pub language_type: String,
+    #[serde(default = "default_false")]
+    pub accurate: bool,
+}
+
+impl Default for BaiduOcrConfig {
+    fn default() -> Self {
+        Self {
+            api_key: String::new(),
+            secret_key: String::new(),
+            language_type: default_baidu_ocr_language(),
+            accurate: false,
+        }
+    }
+}
+
+/**
+ * 百度翻译开放平台配置。
+ */
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct BaiduTranslateConfig {
+    #[serde(default)]
+    pub app_id: String,
+    #[serde(default)]
+    pub app_key: String,
+    #[serde(default = "default_baidu_translate_source")]
+    pub source_lang: String,
+}
+
+impl Default for BaiduTranslateConfig {
+    fn default() -> Self {
+        Self {
+            app_id: String::new(),
+            app_key: String::new(),
+            source_lang: default_baidu_translate_source(),
+        }
+    }
+}
+
+/**
+ * 腾讯云机器翻译配置。
+ */
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TencentTranslateConfig {
+    #[serde(default)]
+    pub secret_id: String,
+    #[serde(default)]
+    pub secret_key: String,
+}
+
+impl Default for TencentTranslateConfig {
+    fn default() -> Self {
+        Self {
+            secret_id: String::new(),
+            secret_key: String::new(),
+        }
+    }
+}
+
+/**
+ * 彩云小译 2 配置。
+ */
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CaiyunTranslateConfig {
+    #[serde(default)]
+    pub token: String,
+}
+
+impl Default for CaiyunTranslateConfig {
+    fn default() -> Self {
+        Self {
+            token: String::new(),
+        }
+    }
 }
 
 /**
@@ -138,54 +233,81 @@ pub struct ModelProvider {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ScreenshotTranslationConfig {
-  #[serde(default = "default_true")]
-  pub enabled: bool,
-  #[serde(default = "default_screenshot_translation_hotkey")]
-  pub hotkey: String,
-  #[serde(default)]
-  pub provider_id: String,
-  #[serde(default = "default_openai_model")]
-  pub model: String,
-  #[serde(default = "default_false")]
-  pub direct_translate: bool,
-  /// 是否启用思考模式（OCR 模型 + 翻译模型）。默认 false：截图翻译追求快，思考通常没必要。
-  #[serde(default = "default_false")]
-  pub thinking_enabled: bool,
-  /// 是否流式输出 OCR + 翻译。默认 true：用户看着字逐步出现的体感比等"加载完"更顺。
-  #[serde(default = "default_true")]
-  pub stream_enabled: bool,
-  /// 截图后是否保留 lens 全屏覆盖。默认 true：选区高亮 + 译文卡同屏；false → lens 缩成浮动小窗，不挡下层 app。
-  #[serde(default = "default_true")]
-  pub keep_fullscreen_after_capture: bool,
-  /// 用 Apple Vision 框架做本地 OCR，把识别出的文字喂给翻译模型。
-  /// true → 系统 OCR + provider 文字翻译（provider 可是任意 OpenAI 兼容 endpoint 或 Apple Intelligence）
-  /// false → provider 必须是多模态模型，一次完成 OCR+翻译
-  /// Apple Intelligence 选作 provider 时强制视为 true（Foundation Models 暂未开放图像输入）。
-  #[serde(default = "default_false")]
-  pub use_system_ocr: bool,
-  #[serde(default)]
-  pub prompt: Option<String>,
-  // 旧版字段，用于迁移
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub openai: Option<OpenAIConfig>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_screenshot_translation_hotkey")]
+    pub hotkey: String,
+    #[serde(default)]
+    pub provider_id: String,
+    #[serde(default = "default_openai_model")]
+    pub model: String,
+    /// OCR 方法：ai / baidu / system。system 为 Apple Vision 本地 OCR 的兼容选项。
+    #[serde(default = "default_screenshot_ocr_method")]
+    pub ocr_method: String,
+    /// 翻译接口：ai / baidu / google / tencent / bing / bing2 / yandex / caiyun2 / microsoft。
+    #[serde(default = "default_screenshot_translation_method")]
+    pub translation_method: String,
+    /// AI 翻译 provider/model。为空时回退到 provider_id/model，兼容旧配置。
+    #[serde(default)]
+    pub translate_provider_id: String,
+    #[serde(default)]
+    pub translate_model: String,
+    #[serde(default)]
+    pub baidu_ocr: BaiduOcrConfig,
+    #[serde(default)]
+    pub baidu_translate: BaiduTranslateConfig,
+    #[serde(default)]
+    pub tencent_translate: TencentTranslateConfig,
+    #[serde(default)]
+    pub caiyun_translate: CaiyunTranslateConfig,
+    #[serde(default = "default_false")]
+    pub direct_translate: bool,
+    /// 是否启用思考模式（OCR 模型 + 翻译模型）。默认 false：截图翻译追求快，思考通常没必要。
+    #[serde(default = "default_false")]
+    pub thinking_enabled: bool,
+    /// 是否流式输出 OCR + 翻译。默认 true：用户看着字逐步出现的体感比等"加载完"更顺。
+    #[serde(default = "default_true")]
+    pub stream_enabled: bool,
+    /// 截图后是否保留 lens 全屏覆盖。默认 true：选区高亮 + 译文卡同屏；false → lens 缩成浮动小窗，不挡下层 app。
+    #[serde(default = "default_true")]
+    pub keep_fullscreen_after_capture: bool,
+    /// 用 Apple Vision 框架做本地 OCR，把识别出的文字喂给翻译模型。
+    /// true → 系统 OCR + provider 文字翻译（provider 可是任意 OpenAI 兼容 endpoint 或 Apple Intelligence）
+    /// false → provider 必须是多模态模型，一次完成 OCR+翻译
+    /// Apple Intelligence 选作 provider 时强制视为 true（Foundation Models 暂未开放图像输入）。
+    #[serde(default = "default_false")]
+    pub use_system_ocr: bool,
+    #[serde(default)]
+    pub prompt: Option<String>,
+    // 旧版字段，用于迁移
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub openai: Option<OpenAIConfig>,
 }
 
 impl Default for ScreenshotTranslationConfig {
-  fn default() -> Self {
-    Self {
-      enabled: true,
-      hotkey: "CommandOrControl+Shift+A".to_string(),
-      provider_id: "default-ocr".to_string(),
-      model: "gpt-4o".to_string(),
-      direct_translate: false,
-      thinking_enabled: false,
-      stream_enabled: true,
-      keep_fullscreen_after_capture: true,
-      use_system_ocr: false,
-      prompt: None,
-      openai: None,
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            hotkey: "CommandOrControl+Shift+A".to_string(),
+            provider_id: "default-ocr".to_string(),
+            model: "gpt-4o".to_string(),
+            ocr_method: "ai".to_string(),
+            translation_method: "ai".to_string(),
+            translate_provider_id: String::new(),
+            translate_model: String::new(),
+            baidu_ocr: BaiduOcrConfig::default(),
+            baidu_translate: BaiduTranslateConfig::default(),
+            tencent_translate: TencentTranslateConfig::default(),
+            caiyun_translate: CaiyunTranslateConfig::default(),
+            direct_translate: false,
+            thinking_enabled: false,
+            stream_enabled: true,
+            keep_fullscreen_after_capture: true,
+            use_system_ocr: false,
+            prompt: None,
+            openai: None,
+        }
     }
-  }
 }
 
 /**
@@ -194,8 +316,8 @@ impl Default for ScreenshotTranslationConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExplainMessage {
-  pub role: String,
-  pub content: String,
+    pub role: String,
+    pub content: String,
 }
 
 /**
@@ -205,59 +327,59 @@ pub struct ExplainMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct LensConfig {
-  #[serde(default = "default_true")]
-  pub enabled: bool,
-  #[serde(default = "default_lens_hotkey")]
-  pub hotkey: String,
-  /// provider/model 留空时 fallback 到 translator_provider_id / translator_model
-  #[serde(default)]
-  pub provider_id: String,
-  #[serde(default)]
-  pub model: String,
-  /// 响应语言（"zh"/"en"）。空字符串表示跟随 settings.target_lang，"auto" 则用 "zh"。
-  #[serde(default)]
-  pub default_language: String,
-  /// 是否流式返回，默认 true。
-  #[serde(default = "default_true")]
-  pub stream_enabled: bool,
-  /// 是否启用思考模式（推理链）。默认 true。
-  /// false 时会向请求 body 注入各家厂商关闭思考的字段并集（不认识的会被 provider 忽略）。
-  #[serde(default = "default_true")]
-  pub thinking_enabled: bool,
-  /// 自定义 system prompt。空字符串使用 default_system_prompt 模板。
-  #[serde(default)]
-  pub system_prompt: String,
-  /// 自定义 question prompt。空字符串使用 default_question_prompt 模板。
-  #[serde(default)]
-  pub question_prompt: String,
-  /// 消息排序："asc" 老到新（默认），"desc" 新到老
-  #[serde(default = "default_message_order")]
-  pub message_order: String,
-  /// 截图后是否保持全屏覆盖。默认 true（保持现有行为）；false 时截图后窗口缩小为浮动。
-  #[serde(default = "default_true")]
-  pub keep_fullscreen_after_capture: bool,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_lens_hotkey")]
+    pub hotkey: String,
+    /// provider/model 留空时 fallback 到 translator_provider_id / translator_model
+    #[serde(default)]
+    pub provider_id: String,
+    #[serde(default)]
+    pub model: String,
+    /// 响应语言（"zh"/"en"）。空字符串表示跟随 settings.target_lang，"auto" 则用 "zh"。
+    #[serde(default)]
+    pub default_language: String,
+    /// 是否流式返回，默认 true。
+    #[serde(default = "default_true")]
+    pub stream_enabled: bool,
+    /// 是否启用思考模式（推理链）。默认 true。
+    /// false 时会向请求 body 注入各家厂商关闭思考的字段并集（不认识的会被 provider 忽略）。
+    #[serde(default = "default_true")]
+    pub thinking_enabled: bool,
+    /// 自定义 system prompt。空字符串使用 default_system_prompt 模板。
+    #[serde(default)]
+    pub system_prompt: String,
+    /// 自定义 question prompt。空字符串使用 default_question_prompt 模板。
+    #[serde(default)]
+    pub question_prompt: String,
+    /// 消息排序："asc" 老到新（默认），"desc" 新到老
+    #[serde(default = "default_message_order")]
+    pub message_order: String,
+    /// 截图后是否保持全屏覆盖。默认 true（保持现有行为）；false 时截图后窗口缩小为浮动。
+    #[serde(default = "default_true")]
+    pub keep_fullscreen_after_capture: bool,
 }
 
 fn default_message_order() -> String {
-  "asc".to_string()
+    "asc".to_string()
 }
 
 impl Default for LensConfig {
-  fn default() -> Self {
-    Self {
-      enabled: true,
-      hotkey: "CommandOrControl+Shift+G".to_string(),
-      provider_id: String::new(),
-      model: String::new(),
-      default_language: String::new(),
-      stream_enabled: true,
-      thinking_enabled: true,
-      system_prompt: String::new(),
-      question_prompt: String::new(),
-      message_order: "asc".to_string(),
-      keep_fullscreen_after_capture: true,
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            hotkey: "CommandOrControl+Shift+G".to_string(),
+            provider_id: String::new(),
+            model: String::new(),
+            default_language: String::new(),
+            stream_enabled: true,
+            thinking_enabled: true,
+            system_prompt: String::new(),
+            question_prompt: String::new(),
+            message_order: "asc".to_string(),
+            keep_fullscreen_after_capture: true,
+        }
     }
-  }
 }
 
 /**
@@ -266,89 +388,89 @@ impl Default for LensConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
-  #[serde(default = "default_hotkey")]
-  pub hotkey: String,
-  #[serde(default = "default_theme")]
-  pub theme: String,
-  #[serde(default = "default_target_lang")]
-  pub target_lang: String,
-  #[serde(default = "default_source")]
-  pub source: String,
-  #[serde(default = "default_true")]
-  pub auto_paste: bool,
-  #[serde(default = "default_false")]
-  pub launch_at_startup: bool,
-  #[serde(default)]
-  pub translator_provider_id: String,
-  #[serde(default = "default_openai_model")]
-  pub translator_model: String,
-  #[serde(default)]
-  pub translator_prompt: Option<String>,
-  #[serde(default)]
-  pub providers: Vec<ModelProvider>,
-  #[serde(default)]
-  pub screenshot_translation: ScreenshotTranslationConfig,
-  #[serde(default, alias = "cowork")]
-  pub lens: LensConfig,
-  #[serde(default = "default_settings_language")]
-  pub settings_language: Option<String>,
-  #[serde(default = "default_retry_enabled")]
-  pub retry_enabled: bool,
-  #[serde(default = "default_retry_attempts")]
-  pub retry_attempts: u8,
-  /// 一次性迁移标记：v2.3.x 钥匙串里的 key 已搬到 api_keys[0] 并清掉旧条目后置 true
-  /// 防止 v2.3.x ↔ v2.4 反复切换时重复抹掉钥匙串
-  #[serde(default)]
-  pub legacy_keyring_migrated: bool,
-  /// 启动时静默检查 GitHub Releases 是否有新版（默认 true）
-  /// 仅做"提示 + 跳转 GH 下载页"，不集成 auto-installer，避免签名密钥那套
-  #[serde(default = "default_true")]
-  pub auto_check_update: bool,
-  /// 截图自动归档开关（默认 false）
-  #[serde(default = "default_false")]
-  pub image_archive_enabled: bool,
-  /// 自动归档目标目录路径（空字符串表示未设置）
-  #[serde(default)]
-  pub image_archive_path: String,
-  // 旧版字段，用于迁移
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub openai: Option<OpenAIConfig>,
+    #[serde(default = "default_hotkey")]
+    pub hotkey: String,
+    #[serde(default = "default_theme")]
+    pub theme: String,
+    #[serde(default = "default_target_lang")]
+    pub target_lang: String,
+    #[serde(default = "default_source")]
+    pub source: String,
+    #[serde(default = "default_true")]
+    pub auto_paste: bool,
+    #[serde(default = "default_false")]
+    pub launch_at_startup: bool,
+    #[serde(default)]
+    pub translator_provider_id: String,
+    #[serde(default = "default_openai_model")]
+    pub translator_model: String,
+    #[serde(default)]
+    pub translator_prompt: Option<String>,
+    #[serde(default)]
+    pub providers: Vec<ModelProvider>,
+    #[serde(default)]
+    pub screenshot_translation: ScreenshotTranslationConfig,
+    #[serde(default, alias = "cowork")]
+    pub lens: LensConfig,
+    #[serde(default = "default_settings_language")]
+    pub settings_language: Option<String>,
+    #[serde(default = "default_retry_enabled")]
+    pub retry_enabled: bool,
+    #[serde(default = "default_retry_attempts")]
+    pub retry_attempts: u8,
+    /// 一次性迁移标记：v2.3.x 钥匙串里的 key 已搬到 api_keys[0] 并清掉旧条目后置 true
+    /// 防止 v2.3.x ↔ v2.4 反复切换时重复抹掉钥匙串
+    #[serde(default)]
+    pub legacy_keyring_migrated: bool,
+    /// 启动时静默检查 GitHub Releases 是否有新版（默认 true）
+    /// 仅做"提示 + 跳转 GH 下载页"，不集成 auto-installer，避免签名密钥那套
+    #[serde(default = "default_true")]
+    pub auto_check_update: bool,
+    /// 截图自动归档开关（默认 false）
+    #[serde(default = "default_false")]
+    pub image_archive_enabled: bool,
+    /// 自动归档目标目录路径（空字符串表示未设置）
+    #[serde(default)]
+    pub image_archive_path: String,
+    // 旧版字段，用于迁移
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub openai: Option<OpenAIConfig>,
 }
 
 impl Settings {
-  /**
-   * 根据 ID 查找提供商
-   */
-  pub fn get_provider(&self, id: &str) -> Option<&ModelProvider> {
-    self.providers.iter().find(|p| p.id == id)
-  }
+    /**
+     * 根据 ID 查找提供商
+     */
+    pub fn get_provider(&self, id: &str) -> Option<&ModelProvider> {
+        self.providers.iter().find(|p| p.id == id)
+    }
 }
 
 impl Default for Settings {
-  fn default() -> Self {
-    Self {
-      hotkey: "CommandOrControl+Alt+T".to_string(),
-      theme: "system".to_string(),
-      target_lang: "auto".to_string(),
-      source: "openai".to_string(),
-      auto_paste: true,
-      launch_at_startup: false,
-      translator_provider_id: "default-translator".to_string(),
-      translator_model: "gpt-4o".to_string(),
-      translator_prompt: None,
-      providers: vec![],
-      screenshot_translation: ScreenshotTranslationConfig::default(),
-      lens: LensConfig::default(),
-      settings_language: Some("zh".to_string()),
-      retry_enabled: default_retry_enabled(),
-      retry_attempts: default_retry_attempts(),
-      legacy_keyring_migrated: false,
-      auto_check_update: true,
-      image_archive_enabled: false,
-      image_archive_path: String::new(),
-      openai: None,
+    fn default() -> Self {
+        Self {
+            hotkey: "CommandOrControl+Alt+T".to_string(),
+            theme: "system".to_string(),
+            target_lang: "auto".to_string(),
+            source: "openai".to_string(),
+            auto_paste: true,
+            launch_at_startup: false,
+            translator_provider_id: "default-translator".to_string(),
+            translator_model: "gpt-4o".to_string(),
+            translator_prompt: None,
+            providers: vec![],
+            screenshot_translation: ScreenshotTranslationConfig::default(),
+            lens: LensConfig::default(),
+            settings_language: Some("zh".to_string()),
+            retry_enabled: default_retry_enabled(),
+            retry_attempts: default_retry_attempts(),
+            legacy_keyring_migrated: false,
+            auto_check_update: true,
+            image_archive_enabled: false,
+            image_archive_path: String::new(),
+            openai: None,
+        }
     }
-  }
 }
 
 /**
@@ -362,184 +484,366 @@ impl Default for Settings {
  * 5. 确保必要字段不为空
  */
 pub fn sanitize_settings(mut settings: Settings) -> Settings {
-  // 1. 从旧版配置迁移
-  if settings.providers.is_empty() {
-    // 迁移翻译提供商
-    if let Some(old_openai) = settings.openai.take() {
-      let legacy_key = old_openai.api_key.trim().to_string();
-      let api_keys = if legacy_key.is_empty() {
-        vec![]
-      } else {
-        vec![legacy_key]
-      };
-      settings.providers.push(ModelProvider {
-        id: "default-translator".to_string(),
-        name: "OpenAI (Translator)".to_string(),
-        api_keys,
-        api_key_legacy: None,
-        base_url: old_openai.base_url,
-        available_models: vec![],
-        enabled_models: vec![old_openai.model.clone()],
-      });
-      settings.translator_provider_id = "default-translator".to_string();
-      settings.translator_model = old_openai.model;
+    // 1. 从旧版配置迁移
+    if settings.providers.is_empty() {
+        // 迁移翻译提供商
+        if let Some(old_openai) = settings.openai.take() {
+            let legacy_key = old_openai.api_key.trim().to_string();
+            let api_keys = if legacy_key.is_empty() {
+                vec![]
+            } else {
+                vec![legacy_key]
+            };
+            settings.providers.push(ModelProvider {
+                id: "default-translator".to_string(),
+                name: "OpenAI (Translator)".to_string(),
+                api_keys,
+                api_key_legacy: None,
+                base_url: old_openai.base_url,
+                available_models: vec![],
+                enabled_models: vec![old_openai.model.clone()],
+            });
+            settings.translator_provider_id = "default-translator".to_string();
+            settings.translator_model = old_openai.model;
+        }
+
+        // 迁移 OCR 提供商
+        if let Some(old_ocr) = settings.screenshot_translation.openai.take() {
+            let legacy_key = old_ocr.api_key.trim().to_string();
+            let api_keys = if legacy_key.is_empty() {
+                vec![]
+            } else {
+                vec![legacy_key]
+            };
+            settings.providers.push(ModelProvider {
+                id: "default-ocr".to_string(),
+                name: "OpenAI (OCR)".to_string(),
+                api_keys,
+                api_key_legacy: None,
+                base_url: old_ocr.base_url,
+                available_models: vec![],
+                enabled_models: vec![old_ocr.model.clone()],
+            });
+            settings.screenshot_translation.provider_id = "default-ocr".to_string();
+            settings.screenshot_translation.model = old_ocr.model;
+        }
     }
 
-    // 迁移 OCR 提供商
-    if let Some(old_ocr) = settings.screenshot_translation.openai.take() {
-      let legacy_key = old_ocr.api_key.trim().to_string();
-      let api_keys = if legacy_key.is_empty() {
-        vec![]
-      } else {
-        vec![legacy_key]
-      };
-      settings.providers.push(ModelProvider {
-        id: "default-ocr".to_string(),
-        name: "OpenAI (OCR)".to_string(),
-        api_keys,
-        api_key_legacy: None,
-        base_url: old_ocr.base_url,
-        available_models: vec![],
-        enabled_models: vec![old_ocr.model.clone()],
-      });
-      settings.screenshot_translation.provider_id = "default-ocr".to_string();
-      settings.screenshot_translation.model = old_ocr.model;
+    // 1b. 单 key → 多 key 迁移（v2.3.1 → v2.4 升级路径）
+    for provider in &mut settings.providers {
+        if let Some(legacy) = provider.api_key_legacy.take() {
+            let trimmed = legacy.trim().to_string();
+            if !trimmed.is_empty() && !provider.api_keys.contains(&trimmed) {
+                provider.api_keys.insert(0, trimmed);
+            }
+        }
+        // 去重 + 去空
+        let mut seen = std::collections::HashSet::new();
+        provider.api_keys.retain(|k| {
+            let trimmed = k.trim();
+            !trimmed.is_empty() && seen.insert(trimmed.to_string())
+        });
     }
-  }
 
-  // 1b. 单 key → 多 key 迁移（v2.3.1 → v2.4 升级路径）
-  for provider in &mut settings.providers {
-    if let Some(legacy) = provider.api_key_legacy.take() {
-      let trimmed = legacy.trim().to_string();
-      if !trimmed.is_empty() && !provider.api_keys.contains(&trimmed) {
-        provider.api_keys.insert(0, trimmed);
-      }
+    // 2. 为空字段设置默认值
+    if settings.translator_model.is_empty() {
+        settings.translator_model = "gpt-4o".to_string();
     }
-    // 去重 + 去空
-    let mut seen = std::collections::HashSet::new();
-    provider.api_keys.retain(|k| {
-      let trimmed = k.trim();
-      !trimmed.is_empty() && seen.insert(trimmed.to_string())
-    });
-  }
+    if settings.screenshot_translation.model.is_empty() {
+        settings.screenshot_translation.model = "gpt-4o".to_string();
+    }
+    if settings.screenshot_translation.use_system_ocr {
+        settings.screenshot_translation.ocr_method = "system".to_string();
+    }
+    if !matches!(
+        settings.screenshot_translation.ocr_method.as_str(),
+        "ai" | "baidu" | "system"
+    ) {
+        settings.screenshot_translation.ocr_method = "ai".to_string();
+    }
+    settings.screenshot_translation.use_system_ocr =
+        settings.screenshot_translation.ocr_method == "system";
+    if !matches!(
+        settings.screenshot_translation.translation_method.as_str(),
+        "ai" | "baidu"
+            | "google"
+            | "tencent"
+            | "bing"
+            | "bing2"
+            | "yandex"
+            | "caiyun2"
+            | "microsoft"
+    ) {
+        settings.screenshot_translation.translation_method = "ai".to_string();
+    }
+    if settings
+        .screenshot_translation
+        .baidu_ocr
+        .language_type
+        .trim()
+        .is_empty()
+    {
+        settings.screenshot_translation.baidu_ocr.language_type = default_baidu_ocr_language();
+    }
+    settings.screenshot_translation.baidu_ocr.language_type = settings
+        .screenshot_translation
+        .baidu_ocr
+        .language_type
+        .trim()
+        .to_string();
+    settings.screenshot_translation.baidu_ocr.api_key = settings
+        .screenshot_translation
+        .baidu_ocr
+        .api_key
+        .trim()
+        .to_string();
+    settings.screenshot_translation.baidu_ocr.secret_key = settings
+        .screenshot_translation
+        .baidu_ocr
+        .secret_key
+        .trim()
+        .to_string();
+    if settings
+        .screenshot_translation
+        .baidu_translate
+        .source_lang
+        .trim()
+        .is_empty()
+    {
+        settings.screenshot_translation.baidu_translate.source_lang =
+            default_baidu_translate_source();
+    }
+    settings.screenshot_translation.baidu_translate.source_lang = settings
+        .screenshot_translation
+        .baidu_translate
+        .source_lang
+        .trim()
+        .to_string();
+    settings.screenshot_translation.baidu_translate.app_id = settings
+        .screenshot_translation
+        .baidu_translate
+        .app_id
+        .trim()
+        .to_string();
+    settings.screenshot_translation.baidu_translate.app_key = settings
+        .screenshot_translation
+        .baidu_translate
+        .app_key
+        .trim()
+        .to_string();
+    settings.screenshot_translation.tencent_translate.secret_id = settings
+        .screenshot_translation
+        .tencent_translate
+        .secret_id
+        .trim()
+        .to_string();
+    settings.screenshot_translation.tencent_translate.secret_key = settings
+        .screenshot_translation
+        .tencent_translate
+        .secret_key
+        .trim()
+        .to_string();
+    settings.screenshot_translation.caiyun_translate.token = settings
+        .screenshot_translation
+        .caiyun_translate
+        .token
+        .trim()
+        .to_string();
 
-  // 2. 为空字段设置默认值
-  if settings.translator_model.is_empty() {
-      settings.translator_model = "gpt-4o".to_string();
-  }
-  if settings.screenshot_translation.model.is_empty() {
-      settings.screenshot_translation.model = "gpt-4o".to_string();
-  }
+    if settings.translator_provider_id.is_empty() && !settings.providers.is_empty() {
+        settings.translator_provider_id = settings.providers[0].id.clone();
+    }
+    if settings.screenshot_translation.provider_id.is_empty() && !settings.providers.is_empty() {
+        settings.screenshot_translation.provider_id = settings.providers[0].id.clone();
+    }
 
-  if settings.translator_provider_id.is_empty() && !settings.providers.is_empty() {
-      settings.translator_provider_id = settings.providers[0].id.clone();
-  }
-  if settings.screenshot_translation.provider_id.is_empty() && !settings.providers.is_empty() {
-      settings.screenshot_translation.provider_id = settings.providers[0].id.clone();
-  }
+    let provider_exists = |id: &str| settings.providers.iter().any(|p| p.id == id);
+    if settings.providers.is_empty() {
+        settings.translator_provider_id.clear();
+        settings.screenshot_translation.provider_id.clear();
+        settings.lens.provider_id.clear();
+    } else {
+        if !provider_exists(&settings.translator_provider_id) {
+            let first = &settings.providers[0];
+            settings.translator_provider_id = first.id.clone();
+            if let Some(model) = first.enabled_models.first() {
+                settings.translator_model = model.clone();
+            }
+        }
+        if !provider_exists(&settings.screenshot_translation.provider_id) {
+            let first = &settings.providers[0];
+            settings.screenshot_translation.provider_id = first.id.clone();
+            if let Some(model) = first.enabled_models.first() {
+                settings.screenshot_translation.model = model.clone();
+            }
+        }
+        if !settings
+            .screenshot_translation
+            .translate_provider_id
+            .is_empty()
+            && !provider_exists(&settings.screenshot_translation.translate_provider_id)
+        {
+            settings
+                .screenshot_translation
+                .translate_provider_id
+                .clear();
+            settings.screenshot_translation.translate_model.clear();
+        }
+        // lens provider 可空（空时 call_vision_api 走 translator_provider_id fallback）；
+        // 但若用户填了一个不存在的，重置为空让其走 fallback。
+        if !settings.lens.provider_id.is_empty() && !provider_exists(&settings.lens.provider_id) {
+            settings.lens.provider_id.clear();
+            settings.lens.model.clear();
+        }
+    }
 
-  let provider_exists = |id: &str| settings.providers.iter().any(|p| p.id == id);
-  if settings.providers.is_empty() {
-      settings.translator_provider_id.clear();
-      settings.screenshot_translation.provider_id.clear();
-      settings.lens.provider_id.clear();
-  } else {
-      if !provider_exists(&settings.translator_provider_id) {
-          let first = &settings.providers[0];
-          settings.translator_provider_id = first.id.clone();
-          if let Some(model) = first.enabled_models.first() {
-              settings.translator_model = model.clone();
-          }
-      }
-      if !provider_exists(&settings.screenshot_translation.provider_id) {
-          let first = &settings.providers[0];
-          settings.screenshot_translation.provider_id = first.id.clone();
-          if let Some(model) = first.enabled_models.first() {
-              settings.screenshot_translation.model = model.clone();
-          }
-      }
-      // lens provider 可空（空时 call_vision_api 走 translator_provider_id fallback）；
-      // 但若用户填了一个不存在的，重置为空让其走 fallback。
-      if !settings.lens.provider_id.is_empty()
-        && !provider_exists(&settings.lens.provider_id)
-      {
-          settings.lens.provider_id.clear();
-          settings.lens.model.clear();
-      }
-  }
+    if settings
+        .screenshot_translation
+        .translate_provider_id
+        .is_empty()
+    {
+        settings.screenshot_translation.translate_provider_id =
+            settings.translator_provider_id.clone();
+        settings.screenshot_translation.translate_model = settings.translator_model.clone();
+    } else if settings.screenshot_translation.translate_model.is_empty() {
+        settings.screenshot_translation.translate_model =
+            if settings.screenshot_translation.translate_provider_id
+                == settings.translator_provider_id
+            {
+                settings.translator_model.clone()
+            } else {
+                settings
+                    .providers
+                    .iter()
+                    .find(|p| p.id == settings.screenshot_translation.translate_provider_id)
+                    .and_then(|p| p.enabled_models.first())
+                    .cloned()
+                    .unwrap_or_else(|| settings.translator_model.clone())
+            };
+    }
 
-  // 3. 确保当前使用的模型在 enabled_models 列表中
-  for provider in &mut settings.providers {
-      if provider.enabled_models.is_empty() {
-          // 如果该提供商被某个功能使用，添加对应模型
-          if settings.translator_provider_id == provider.id {
-              provider.enabled_models.push(settings.translator_model.clone());
-          }
-          if settings.screenshot_translation.provider_id == provider.id
-            && !provider.enabled_models.contains(&settings.screenshot_translation.model)
-          {
-              provider.enabled_models.push(settings.screenshot_translation.model.clone());
-          }
-          if !settings.lens.provider_id.is_empty()
+    // 3. 确保当前使用的模型在 enabled_models 列表中
+    for provider in &mut settings.providers {
+        if provider.enabled_models.is_empty() {
+            // 如果该提供商被某个功能使用，添加对应模型
+            if settings.translator_provider_id == provider.id {
+                provider
+                    .enabled_models
+                    .push(settings.translator_model.clone());
+            }
+            if settings.screenshot_translation.provider_id == provider.id
+                && !provider
+                    .enabled_models
+                    .contains(&settings.screenshot_translation.model)
+            {
+                provider
+                    .enabled_models
+                    .push(settings.screenshot_translation.model.clone());
+            }
+            if !settings
+                .screenshot_translation
+                .translate_provider_id
+                .is_empty()
+                && settings.screenshot_translation.translate_provider_id == provider.id
+                && !settings.screenshot_translation.translate_model.is_empty()
+                && !provider
+                    .enabled_models
+                    .contains(&settings.screenshot_translation.translate_model)
+            {
+                provider
+                    .enabled_models
+                    .push(settings.screenshot_translation.translate_model.clone());
+            }
+            if !settings.lens.provider_id.is_empty()
+                && settings.lens.provider_id == provider.id
+                && !settings.lens.model.is_empty()
+                && !provider.enabled_models.contains(&settings.lens.model)
+            {
+                provider.enabled_models.push(settings.lens.model.clone());
+            }
+            // 如果仍然为空，添加默认模型
+            if provider.enabled_models.is_empty() {
+                provider.enabled_models.push("gpt-4o".to_string());
+            }
+        }
+
+        // 确保当前使用的模型确实在该 provider 的 enabled_models 中
+        if settings.translator_provider_id == provider.id
+            && !provider.enabled_models.contains(&settings.translator_model)
+        {
+            settings.translator_model = provider.enabled_models[0].clone();
+        }
+        if settings.screenshot_translation.provider_id == provider.id
+            && !provider
+                .enabled_models
+                .contains(&settings.screenshot_translation.model)
+        {
+            settings.screenshot_translation.model = provider.enabled_models[0].clone();
+        }
+        if !settings
+            .screenshot_translation
+            .translate_provider_id
+            .is_empty()
+            && settings.screenshot_translation.translate_provider_id == provider.id
+            && !settings.screenshot_translation.translate_model.is_empty()
+            && !provider
+                .enabled_models
+                .contains(&settings.screenshot_translation.translate_model)
+        {
+            settings.screenshot_translation.translate_model = provider.enabled_models[0].clone();
+        }
+        if !settings.lens.provider_id.is_empty()
             && settings.lens.provider_id == provider.id
             && !settings.lens.model.is_empty()
             && !provider.enabled_models.contains(&settings.lens.model)
-          {
-              provider.enabled_models.push(settings.lens.model.clone());
-          }
-          // 如果仍然为空，添加默认模型
-          if provider.enabled_models.is_empty() {
-              provider.enabled_models.push("gpt-4o".to_string());
-          }
-      }
+        {
+            settings.lens.model = provider.enabled_models[0].clone();
+        }
+    }
 
-      // 确保当前使用的模型确实在该 provider 的 enabled_models 中
-      if settings.translator_provider_id == provider.id && !provider.enabled_models.contains(&settings.translator_model) {
-          settings.translator_model = provider.enabled_models[0].clone();
-      }
-      if settings.screenshot_translation.provider_id == provider.id && !provider.enabled_models.contains(&settings.screenshot_translation.model) {
-          settings.screenshot_translation.model = provider.enabled_models[0].clone();
-      }
-      if !settings.lens.provider_id.is_empty()
-        && settings.lens.provider_id == provider.id
-        && !settings.lens.model.is_empty()
-        && !provider.enabled_models.contains(&settings.lens.model)
-      {
-          settings.lens.model = provider.enabled_models[0].clone();
-      }
-  }
+    if !settings
+        .screenshot_translation
+        .translate_provider_id
+        .is_empty()
+    {
+        settings.translator_provider_id = settings
+            .screenshot_translation
+            .translate_provider_id
+            .clone();
+        settings.translator_model = settings.screenshot_translation.translate_model.clone();
+    }
 
-  // 4. 规范化快捷键字符串
-  settings.hotkey = normalize_hotkey(&settings.hotkey);
-  settings.screenshot_translation.hotkey =
-    normalize_hotkey(&settings.screenshot_translation.hotkey);
-  settings.lens.hotkey = normalize_hotkey(&settings.lens.hotkey);
+    // 4. 规范化快捷键字符串
+    settings.hotkey = normalize_hotkey(&settings.hotkey);
+    settings.screenshot_translation.hotkey =
+        normalize_hotkey(&settings.screenshot_translation.hotkey);
+    settings.lens.hotkey = normalize_hotkey(&settings.lens.hotkey);
 
-  // 规范化提示词（去除首尾空白，空值转为 None）
-  settings.translator_prompt = normalize_optional_prompt(settings.translator_prompt.take());
-  settings.screenshot_translation.prompt =
-    normalize_optional_prompt(settings.screenshot_translation.prompt.take());
+    // 规范化提示词（去除首尾空白，空值转为 None）
+    settings.translator_prompt = normalize_optional_prompt(settings.translator_prompt.take());
+    settings.screenshot_translation.prompt =
+        normalize_optional_prompt(settings.screenshot_translation.prompt.take());
 
-  // 5. 确保必要字段不为空
-  if settings.hotkey.is_empty() {
-    settings.hotkey = "CommandOrControl+Alt+T".to_string();
-  }
-  if settings.screenshot_translation.hotkey.is_empty() {
-    settings.screenshot_translation.hotkey = "CommandOrControl+Shift+A".to_string();
-  }
-  if settings.lens.hotkey.is_empty() {
-    settings.lens.hotkey = "CommandOrControl+Shift+G".to_string();
-  }
-  if settings.lens.message_order != "asc" && settings.lens.message_order != "desc" {
-    settings.lens.message_order = "asc".to_string();
-  }
+    // 5. 确保必要字段不为空
+    if settings.hotkey.is_empty() {
+        settings.hotkey = "CommandOrControl+Alt+T".to_string();
+    }
+    if settings.screenshot_translation.hotkey.is_empty() {
+        settings.screenshot_translation.hotkey = "CommandOrControl+Shift+A".to_string();
+    }
+    if settings.lens.hotkey.is_empty() {
+        settings.lens.hotkey = "CommandOrControl+Shift+G".to_string();
+    }
+    if settings.lens.message_order != "asc" && settings.lens.message_order != "desc" {
+        settings.lens.message_order = "asc".to_string();
+    }
 
-  // 清理归档目录路径（去除首尾空白）
-  settings.image_archive_path = settings.image_archive_path.trim().to_string();
+    // 清理归档目录路径（去除首尾空白）
+    settings.image_archive_path = settings.image_archive_path.trim().to_string();
 
-  settings.retry_attempts = clamp_retry_attempts(settings.retry_attempts);
+    settings.retry_attempts = clamp_retry_attempts(settings.retry_attempts);
 
-  settings
+    settings
 }
 
 /**
@@ -551,23 +855,23 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
  * 新版加载时 sanitize_settings 会把 api_key_legacy.take() 合并回 api_keys 并去重，无副作用。
  */
 pub fn persist_settings(app: &AppHandle, settings: &Settings) -> Result<(), String> {
-  let mut to_persist = settings.clone();
-  for provider in &mut to_persist.providers {
-    if let Some(primary) = provider.api_keys.first() {
-      if !primary.trim().is_empty() {
-        provider.api_key_legacy = Some(primary.clone());
-      }
+    let mut to_persist = settings.clone();
+    for provider in &mut to_persist.providers {
+        if let Some(primary) = provider.api_keys.first() {
+            if !primary.trim().is_empty() {
+                provider.api_key_legacy = Some(primary.clone());
+            }
+        }
     }
-  }
 
-  let store = StoreBuilder::new(app, SETTINGS_STORE)
-    .build()
-    .map_err(|e| e.to_string())?;
-  store.set(
-    "settings".to_string(),
-    serde_json::to_value(&to_persist).map_err(|e| e.to_string())?,
-  );
-  store.save().map_err(|e| e.to_string())
+    let store = StoreBuilder::new(app, SETTINGS_STORE)
+        .build()
+        .map_err(|e| e.to_string())?;
+    store.set(
+        "settings".to_string(),
+        serde_json::to_value(&to_persist).map_err(|e| e.to_string())?,
+    );
+    store.save().map_err(|e| e.to_string())
 }
 
 /**
@@ -579,54 +883,56 @@ pub fn persist_settings(app: &AppHandle, settings: &Settings) -> Result<(), Stri
  * 幂等：新目录已存在 settings.json → 跳过；旧目录不存在 → 跳过（全新安装）。
  */
 fn migrate_legacy_app_data(app: &AppHandle) {
-  use tauri::Manager;
-  let new_dir = match app.path().app_data_dir() {
-    Ok(d) => d,
-    Err(err) => {
-      eprintln!("[migrate-app-data] app_data_dir unavailable: {err}");
-      return;
+    use tauri::Manager;
+    let new_dir = match app.path().app_data_dir() {
+        Ok(d) => d,
+        Err(err) => {
+            eprintln!("[migrate-app-data] app_data_dir unavailable: {err}");
+            return;
+        }
+    };
+    if new_dir.join(SETTINGS_STORE).exists() {
+        return;
     }
-  };
-  if new_dir.join(SETTINGS_STORE).exists() {
-    return;
-  }
 
-  let Some(parent) = new_dir.parent() else { return };
-  // 旧 identifier 的目录名就是 identifier 本身（macOS / Windows / Linux 都一致）
-  let legacy_dir = parent.join("com.zmair.keylingo");
-  if !legacy_dir.is_dir() {
-    return;
-  }
+    let Some(parent) = new_dir.parent() else {
+        return;
+    };
+    // 旧 identifier 的目录名就是 identifier 本身（macOS / Windows / Linux 都一致）
+    let legacy_dir = parent.join("com.zmair.keylingo");
+    if !legacy_dir.is_dir() {
+        return;
+    }
 
-  if let Err(err) = std::fs::create_dir_all(&new_dir) {
-    eprintln!("[migrate-app-data] mkdir new dir failed: {err}");
-    return;
-  }
+    if let Err(err) = std::fs::create_dir_all(&new_dir) {
+        eprintln!("[migrate-app-data] mkdir new dir failed: {err}");
+        return;
+    }
 
-  match copy_dir_recursive(&legacy_dir, &new_dir) {
-    Ok(()) => eprintln!(
-      "[migrate-app-data] copied legacy app data: {} → {}",
-      legacy_dir.display(),
-      new_dir.display()
-    ),
-    Err(err) => eprintln!("[migrate-app-data] copy failed: {err}"),
-  }
+    match copy_dir_recursive(&legacy_dir, &new_dir) {
+        Ok(()) => eprintln!(
+            "[migrate-app-data] copied legacy app data: {} → {}",
+            legacy_dir.display(),
+            new_dir.display()
+        ),
+        Err(err) => eprintln!("[migrate-app-data] copy failed: {err}"),
+    }
 }
 
 fn copy_dir_recursive(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
-  std::fs::create_dir_all(to)?;
-  for entry in std::fs::read_dir(from)? {
-    let entry = entry?;
-    let src = entry.path();
-    let dst = to.join(entry.file_name());
-    if src.is_dir() {
-      copy_dir_recursive(&src, &dst)?;
-    } else if src.is_file() && !dst.exists() {
-      // 不覆盖已有目标文件：避免与用户在新路径下手动建/写过的内容冲突
-      std::fs::copy(&src, &dst)?;
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let src = entry.path();
+        let dst = to.join(entry.file_name());
+        if src.is_dir() {
+            copy_dir_recursive(&src, &dst)?;
+        } else if src.is_file() && !dst.exists() {
+            // 不覆盖已有目标文件：避免与用户在新路径下手动建/写过的内容冲突
+            std::fs::copy(&src, &dst)?;
+        }
     }
-  }
-  Ok(())
+    Ok(())
 }
 
 /**
@@ -634,19 +940,19 @@ fn copy_dir_recursive(from: &std::path::Path, to: &std::path::Path) -> std::io::
  * 执行清理迁移；若 settings.json 中无 API Key，则从旧版 keyring 一次性迁移
  */
 pub fn load_settings(app: &AppHandle) -> Settings {
-  // 入口先把旧 identifier 目录的数据搬到新目录（幂等）
-  migrate_legacy_app_data(app);
-  let store = StoreBuilder::new(app, SETTINGS_STORE).build();
-  let settings = match store {
-    Ok(store) => store
-      .get("settings")
-      .and_then(|value| serde_json::from_value(value).ok())
-      .unwrap_or_default(),
-    Err(_) => Settings::default(),
-  };
-  let mut sanitized = sanitize_settings(settings);
-  migrate_legacy_keyring_keys(&mut sanitized);
-  sanitized
+    // 入口先把旧 identifier 目录的数据搬到新目录（幂等）
+    migrate_legacy_app_data(app);
+    let store = StoreBuilder::new(app, SETTINGS_STORE).build();
+    let settings = match store {
+        Ok(store) => store
+            .get("settings")
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or_default(),
+        Err(_) => Settings::default(),
+    };
+    let mut sanitized = sanitize_settings(settings);
+    migrate_legacy_keyring_keys(&mut sanitized);
+    sanitized
 }
 
 // ========== 默认提示词生成 ==========
@@ -657,7 +963,7 @@ pub fn load_settings(app: &AppHandle) -> Settings {
  * 风格统一：简短直答、无小标题、思考过程尽量精简
  */
 pub fn default_system_prompt(language: &str, has_image: bool) -> String {
-  match (language.starts_with("zh"), has_image) {
+    match (language.starts_with("zh"), has_image) {
     (true, true) => "你是一位智能助手，能够看到用户分享的截图。请将其作为视觉上下文来理解和回答，可以涉及信息提取、概念解释、操作协助或任何相关话题。保持回答简洁直接，自然流畅，不用小标题和编号。数学公式用 LaTeX（$...$ 或 $$...$$）。思考保持简洁，避免反复重述。".to_string(),
     (true, false) => "你是一位智能助手。直接给出答案，回答简洁、自然流畅，不要小标题或编号。数学公式用 LaTeX（$...$ 或 $$...$$）。思考保持简洁，避免反复重述。".to_string(),
     (_, true) => "You are a helpful assistant that can see the user's screenshot. Use it as visual context to understand and answer — whether extracting information, explaining concepts, assisting with tasks, or any relevant topic. Keep responses short and natural — no headings or bullet points. Use LaTeX ($...$ or $$...$$) for math. Think briefly; avoid repeating yourself.".to_string(),
@@ -671,11 +977,11 @@ pub fn default_system_prompt(language: &str, has_image: bool) -> String {
  * 仍可让模型按指令省略思考过程。
  */
 pub fn no_think_instruction(language: &str) -> &'static str {
-  if language.starts_with("zh") {
-    "\n\n严格要求：直接给出最终答案，不要输出任何思考过程、推理步骤或 <think> 内容。"
-  } else {
-    "\n\nStrict requirement: output only the final answer; do NOT include any thinking, reasoning steps, or <think> content."
-  }
+    if language.starts_with("zh") {
+        "\n\n严格要求：直接给出最终答案，不要输出任何思考过程、推理步骤或 <think> 内容。"
+    } else {
+        "\n\nStrict requirement: output only the final answer; do NOT include any thinking, reasoning steps, or <think> content."
+    }
 }
 
 /**
@@ -683,266 +989,293 @@ pub fn no_think_instruction(language: &str) -> &'static str {
  * has_image=true 时让模型聚焦图片内容；has_image=false 时返回空串（不附加前缀，直接传用户原话）
  */
 pub fn default_question_prompt(language: &str, has_image: bool) -> String {
-  if !has_image {
-    return String::new();
-  }
-  if language.starts_with("zh") {
-    "用户分享了这张截图，请结合其中的视觉信息来理解和回答：".to_string()
-  } else {
-    "The user shared this screenshot. Use the visual context to understand and answer:".to_string()
-  }
+    if !has_image {
+        return String::new();
+    }
+    if language.starts_with("zh") {
+        "用户分享了这张截图，请结合其中的视觉信息来理解和回答：".to_string()
+    } else {
+        "The user shared this screenshot. Use the visual context to understand and answer:"
+            .to_string()
+    }
 }
 
 // ========== 默认值辅助函数 ==========
 
 fn default_true() -> bool {
-  true
+    true
 }
 
 fn default_false() -> bool {
-  false
+    false
 }
 
 fn default_hotkey() -> String {
-  "CommandOrControl+Alt+T".to_string()
+    "CommandOrControl+Alt+T".to_string()
 }
 
 fn default_screenshot_translation_hotkey() -> String {
-  "CommandOrControl+Shift+A".to_string()
+    "CommandOrControl+Shift+A".to_string()
+}
+
+fn default_screenshot_ocr_method() -> String {
+    "ai".to_string()
+}
+
+fn default_screenshot_translation_method() -> String {
+    "ai".to_string()
+}
+
+fn default_baidu_ocr_language() -> String {
+    "CHN_ENG".to_string()
+}
+
+fn default_baidu_translate_source() -> String {
+    "auto".to_string()
 }
 
 fn default_lens_hotkey() -> String {
-  "CommandOrControl+Shift+G".to_string()
+    "CommandOrControl+Shift+G".to_string()
 }
 
 fn default_theme() -> String {
-  "system".to_string()
+    "system".to_string()
 }
 
 fn default_target_lang() -> String {
-  "auto".to_string()
+    "auto".to_string()
 }
 
 fn default_source() -> String {
-  "openai".to_string()
+    "openai".to_string()
 }
 
 fn default_openai_base_url() -> String {
-  "https://api.openai.com/v1".to_string()
+    "https://api.openai.com/v1/responses".to_string()
 }
 
 fn default_openai_model() -> String {
-  "gpt-4o".to_string()
+    "gpt-4o".to_string()
 }
 
 fn default_settings_language() -> Option<String> {
-  Some("zh".to_string())
+    Some("zh".to_string())
 }
 
 fn default_retry_attempts() -> u8 {
-  3
+    3
 }
 
 fn default_retry_enabled() -> bool {
-  true
+    true
 }
 
 fn clamp_retry_attempts(value: u8) -> u8 {
-  value.clamp(1, 5)
+    value.clamp(1, 5)
 }
 
 /**
  * 规范化可选提示词：去除空白，空字符串转为 None
  */
 fn normalize_optional_prompt(value: Option<String>) -> Option<String> {
-  value.and_then(|v| {
-    let trimmed = v.trim();
-    if trimmed.is_empty() {
-      None
-    } else {
-      Some(trimmed.to_string())
-    }
-  })
+    value.and_then(|v| {
+        let trimmed = v.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
 }
 
 /**
  * 规范化快捷键字符串：去除各部分首尾空白并过滤空部分
  */
 fn normalize_hotkey(value: &str) -> String {
-  value
-    .split('+')
-    .map(|part| {
-      let trimmed = part.trim();
-      match trimmed.to_lowercase().as_str() {
-        "cmd" | "command" | "commandorcontrol" => "CommandOrControl".to_string(),
-        "ctrl" | "control" => "Control".to_string(),
-        "opt" | "option" | "alt" => "Alt".to_string(),
-        "shift" => "Shift".to_string(),
-        "super" | "meta" => "Super".to_string(),
-        "plus" => "Plus".to_string(),
-        _ => trimmed.to_string(),
-      }
-    })
-    .filter(|part| !part.is_empty())
-    .collect::<Vec<_>>()
-    .join("+")
+    value
+        .split('+')
+        .map(|part| {
+            let trimmed = part.trim();
+            match trimmed.to_lowercase().as_str() {
+                "cmd" | "command" | "commandorcontrol" => "CommandOrControl".to_string(),
+                "ctrl" | "control" => "Control".to_string(),
+                "opt" | "option" | "alt" => "Alt".to_string(),
+                "shift" => "Shift".to_string(),
+                "super" | "meta" => "Super".to_string(),
+                "plus" => "Plus".to_string(),
+                _ => trimmed.to_string(),
+            }
+        })
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("+")
 }
 
 #[cfg(test)]
 mod tests {
-  use super::*;
+    use super::*;
 
-  // ===== normalize_hotkey =====
+    // ===== normalize_hotkey =====
 
-  #[test]
-  fn normalize_hotkey_canonicalizes_aliases() {
-    // 仅规范修饰键名（cmd/ctrl/opt/super/meta），按键名 case 透传
-    assert_eq!(normalize_hotkey("cmd+shift+a"), "CommandOrControl+Shift+a");
-    assert_eq!(normalize_hotkey("Command+Alt+T"), "CommandOrControl+Alt+T");
-    assert_eq!(normalize_hotkey("ctrl+shift+G"), "Control+Shift+G");
-    assert_eq!(normalize_hotkey("opt+space"), "Alt+space");
-    assert_eq!(normalize_hotkey("option+x"), "Alt+x");
-    assert_eq!(normalize_hotkey("super+L"), "Super+L");
-    assert_eq!(normalize_hotkey("meta+L"), "Super+L");
-  }
+    #[test]
+    fn normalize_hotkey_canonicalizes_aliases() {
+        // 仅规范修饰键名（cmd/ctrl/opt/super/meta），按键名 case 透传
+        assert_eq!(normalize_hotkey("cmd+shift+a"), "CommandOrControl+Shift+a");
+        assert_eq!(normalize_hotkey("Command+Alt+T"), "CommandOrControl+Alt+T");
+        assert_eq!(normalize_hotkey("ctrl+shift+G"), "Control+Shift+G");
+        assert_eq!(normalize_hotkey("opt+space"), "Alt+space");
+        assert_eq!(normalize_hotkey("option+x"), "Alt+x");
+        assert_eq!(normalize_hotkey("super+L"), "Super+L");
+        assert_eq!(normalize_hotkey("meta+L"), "Super+L");
+    }
 
-  #[test]
-  fn normalize_hotkey_preserves_key_case() {
-    // 按键名大小写不被改动（Tauri 全局快捷键大小写敏感）
-    assert_eq!(normalize_hotkey("cmd+a"), "CommandOrControl+a");
-    assert_eq!(normalize_hotkey("cmd+A"), "CommandOrControl+A");
-  }
+    #[test]
+    fn normalize_hotkey_preserves_key_case() {
+        // 按键名大小写不被改动（Tauri 全局快捷键大小写敏感）
+        assert_eq!(normalize_hotkey("cmd+a"), "CommandOrControl+a");
+        assert_eq!(normalize_hotkey("cmd+A"), "CommandOrControl+A");
+    }
 
-  #[test]
-  fn normalize_hotkey_trims_whitespace() {
-    assert_eq!(normalize_hotkey(" cmd + shift + a "), "CommandOrControl+Shift+a");
-  }
+    #[test]
+    fn normalize_hotkey_trims_whitespace() {
+        assert_eq!(
+            normalize_hotkey(" cmd + shift + a "),
+            "CommandOrControl+Shift+a"
+        );
+    }
 
-  #[test]
-  fn normalize_hotkey_filters_empty_parts() {
-    assert_eq!(normalize_hotkey("cmd++a"), "CommandOrControl+a");
-    assert_eq!(normalize_hotkey("+cmd+a+"), "CommandOrControl+a");
-  }
+    #[test]
+    fn normalize_hotkey_filters_empty_parts() {
+        assert_eq!(normalize_hotkey("cmd++a"), "CommandOrControl+a");
+        assert_eq!(normalize_hotkey("+cmd+a+"), "CommandOrControl+a");
+    }
 
-  #[test]
-  fn normalize_hotkey_preserves_unknown_keys_verbatim() {
-    // F1, Backspace 等键名直接透传，不做 case 转换
-    assert_eq!(normalize_hotkey("cmd+F1"), "CommandOrControl+F1");
-    assert_eq!(normalize_hotkey("ctrl+Backspace"), "Control+Backspace");
-  }
+    #[test]
+    fn normalize_hotkey_preserves_unknown_keys_verbatim() {
+        // F1, Backspace 等键名直接透传，不做 case 转换
+        assert_eq!(normalize_hotkey("cmd+F1"), "CommandOrControl+F1");
+        assert_eq!(normalize_hotkey("ctrl+Backspace"), "Control+Backspace");
+    }
 
-  // ===== sanitize_settings =====
+    // ===== sanitize_settings =====
 
-  #[test]
-  fn sanitize_settings_clamps_retry_attempts() {
-    let mut s = Settings::default();
-    s.retry_attempts = 0;
-    let s = sanitize_settings(s);
-    assert!((1..=5).contains(&s.retry_attempts));
+    #[test]
+    fn sanitize_settings_clamps_retry_attempts() {
+        let mut s = Settings::default();
+        s.retry_attempts = 0;
+        let s = sanitize_settings(s);
+        assert!((1..=5).contains(&s.retry_attempts));
 
-    let mut s = Settings::default();
-    s.retry_attempts = 99;
-    let s = sanitize_settings(s);
-    assert!((1..=5).contains(&s.retry_attempts));
-  }
+        let mut s = Settings::default();
+        s.retry_attempts = 99;
+        let s = sanitize_settings(s);
+        assert!((1..=5).contains(&s.retry_attempts));
+    }
 
-  #[test]
-  fn sanitize_settings_normalizes_hotkeys() {
-    let mut s = Settings::default();
-    s.hotkey = "cmd+alt+T".to_string();
-    s.screenshot_translation.hotkey = "ctrl+shift+A".to_string();
-    s.lens.hotkey = "cmd+shift+G".to_string();
-    let s = sanitize_settings(s);
-    assert_eq!(s.hotkey, "CommandOrControl+Alt+T");
-    assert_eq!(s.screenshot_translation.hotkey, "Control+Shift+A");
-    assert_eq!(s.lens.hotkey, "CommandOrControl+Shift+G");
-  }
+    #[test]
+    fn sanitize_settings_normalizes_hotkeys() {
+        let mut s = Settings::default();
+        s.hotkey = "cmd+alt+T".to_string();
+        s.screenshot_translation.hotkey = "ctrl+shift+A".to_string();
+        s.lens.hotkey = "cmd+shift+G".to_string();
+        let s = sanitize_settings(s);
+        assert_eq!(s.hotkey, "CommandOrControl+Alt+T");
+        assert_eq!(s.screenshot_translation.hotkey, "Control+Shift+A");
+        assert_eq!(s.lens.hotkey, "CommandOrControl+Shift+G");
+    }
 
-  #[test]
-  fn sanitize_settings_falls_back_when_main_hotkey_empty() {
-    let mut s = Settings::default();
-    s.hotkey = String::new();
-    let s = sanitize_settings(s);
-    assert!(!s.hotkey.is_empty(), "empty hotkey should be replaced with default");
-  }
+    #[test]
+    fn sanitize_settings_falls_back_when_main_hotkey_empty() {
+        let mut s = Settings::default();
+        s.hotkey = String::new();
+        let s = sanitize_settings(s);
+        assert!(
+            !s.hotkey.is_empty(),
+            "empty hotkey should be replaced with default"
+        );
+    }
 
-  #[test]
-  fn sanitize_settings_migrates_legacy_apikey_to_apikeys() {
-    let mut s = Settings::default();
-    s.providers.push(ModelProvider {
-      id: "p".to_string(),
-      name: "P".to_string(),
-      api_keys: vec![],
-      api_key_legacy: Some("sk-legacy".to_string()),
-      base_url: "https://api.example.com/v1".to_string(),
-      available_models: vec![],
-      enabled_models: vec!["m".to_string()],
-    });
-    let s = sanitize_settings(s);
-    let p = s.get_provider("p").unwrap();
-    assert_eq!(p.api_keys, vec!["sk-legacy".to_string()]);
-    assert!(p.api_key_legacy.is_none(), "legacy field should be drained");
-  }
+    #[test]
+    fn sanitize_settings_migrates_legacy_apikey_to_apikeys() {
+        let mut s = Settings::default();
+        s.providers.push(ModelProvider {
+            id: "p".to_string(),
+            name: "P".to_string(),
+            api_keys: vec![],
+            api_key_legacy: Some("sk-legacy".to_string()),
+            base_url: "https://api.example.com/v1".to_string(),
+            available_models: vec![],
+            enabled_models: vec!["m".to_string()],
+        });
+        let s = sanitize_settings(s);
+        let p = s.get_provider("p").unwrap();
+        assert_eq!(p.api_keys, vec!["sk-legacy".to_string()]);
+        assert!(p.api_key_legacy.is_none(), "legacy field should be drained");
+    }
 
-  #[test]
-  fn sanitize_settings_dedupes_apikey_legacy_against_apikeys() {
-    let mut s = Settings::default();
-    s.providers.push(ModelProvider {
-      id: "p".to_string(),
-      name: "P".to_string(),
-      api_keys: vec!["sk-1".to_string(), "sk-2".to_string()],
-      api_key_legacy: Some("sk-1".to_string()), // 已在 api_keys 中
-      base_url: "https://api.example.com/v1".to_string(),
-      available_models: vec![],
-      enabled_models: vec!["m".to_string()],
-    });
-    let s = sanitize_settings(s);
-    let p = s.get_provider("p").unwrap();
-    assert_eq!(p.api_keys.len(), 2, "duplicate legacy key should not be inserted");
-  }
+    #[test]
+    fn sanitize_settings_dedupes_apikey_legacy_against_apikeys() {
+        let mut s = Settings::default();
+        s.providers.push(ModelProvider {
+            id: "p".to_string(),
+            name: "P".to_string(),
+            api_keys: vec!["sk-1".to_string(), "sk-2".to_string()],
+            api_key_legacy: Some("sk-1".to_string()), // 已在 api_keys 中
+            base_url: "https://api.example.com/v1".to_string(),
+            available_models: vec![],
+            enabled_models: vec!["m".to_string()],
+        });
+        let s = sanitize_settings(s);
+        let p = s.get_provider("p").unwrap();
+        assert_eq!(
+            p.api_keys.len(),
+            2,
+            "duplicate legacy key should not be inserted"
+        );
+    }
 
-  #[test]
-  fn sanitize_settings_filters_empty_apikeys() {
-    let mut s = Settings::default();
-    s.providers.push(ModelProvider {
-      id: "p".to_string(),
-      name: "P".to_string(),
-      api_keys: vec!["sk-1".to_string(), "  ".to_string(), String::new()],
-      api_key_legacy: None,
-      base_url: "https://api.example.com/v1".to_string(),
-      available_models: vec![],
-      enabled_models: vec!["m".to_string()],
-    });
-    let s = sanitize_settings(s);
-    let p = s.get_provider("p").unwrap();
-    assert_eq!(p.api_keys, vec!["sk-1".to_string()]);
-  }
+    #[test]
+    fn sanitize_settings_filters_empty_apikeys() {
+        let mut s = Settings::default();
+        s.providers.push(ModelProvider {
+            id: "p".to_string(),
+            name: "P".to_string(),
+            api_keys: vec!["sk-1".to_string(), "  ".to_string(), String::new()],
+            api_key_legacy: None,
+            base_url: "https://api.example.com/v1".to_string(),
+            available_models: vec![],
+            enabled_models: vec!["m".to_string()],
+        });
+        let s = sanitize_settings(s);
+        let p = s.get_provider("p").unwrap();
+        assert_eq!(p.api_keys, vec!["sk-1".to_string()]);
+    }
 
-  #[test]
-  fn sanitize_settings_clamps_unknown_message_order() {
-    let mut s = Settings::default();
-    s.lens.message_order = "garbage".to_string();
-    let s = sanitize_settings(s);
-    assert_eq!(s.lens.message_order, "asc");
-  }
+    #[test]
+    fn sanitize_settings_clamps_unknown_message_order() {
+        let mut s = Settings::default();
+        s.lens.message_order = "garbage".to_string();
+        let s = sanitize_settings(s);
+        assert_eq!(s.lens.message_order, "asc");
+    }
 
-  #[test]
-  fn sanitize_settings_resets_lens_provider_when_pointing_to_nonexistent() {
-    let mut s = Settings::default();
-    s.providers.push(ModelProvider {
-      id: "real".to_string(),
-      name: "Real".to_string(),
-      api_keys: vec!["sk".to_string()],
-      api_key_legacy: None,
-      base_url: "https://api.example.com/v1".to_string(),
-      available_models: vec![],
-      enabled_models: vec!["m".to_string()],
-    });
-    s.lens.provider_id = "nonexistent".to_string();
-    s.lens.model = "ghost-model".to_string();
-    let s = sanitize_settings(s);
-    // 不存在的 provider_id 应被清空 → fallback 到 translator provider/model
-    assert_eq!(s.lens.provider_id, "");
-    assert_eq!(s.lens.model, "");
-  }
+    #[test]
+    fn sanitize_settings_resets_lens_provider_when_pointing_to_nonexistent() {
+        let mut s = Settings::default();
+        s.providers.push(ModelProvider {
+            id: "real".to_string(),
+            name: "Real".to_string(),
+            api_keys: vec!["sk".to_string()],
+            api_key_legacy: None,
+            base_url: "https://api.example.com/v1".to_string(),
+            available_models: vec![],
+            enabled_models: vec!["m".to_string()],
+        });
+        s.lens.provider_id = "nonexistent".to_string();
+        s.lens.model = "ghost-model".to_string();
+        let s = sanitize_settings(s);
+        // 不存在的 provider_id 应被清空 → fallback 到 translator provider/model
+        assert_eq!(s.lens.provider_id, "");
+        assert_eq!(s.lens.model, "");
+    }
 }
