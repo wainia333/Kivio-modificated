@@ -589,6 +589,15 @@ fn take_lens_selection(state: State<'_, AppState>) -> Result<String, String> {
     }
 }
 
+/// 取走普通翻译窗口热键启动前抓到的 selection 文本。
+#[tauri::command]
+fn take_translator_selection(state: State<'_, AppState>) -> Result<String, String> {
+    match state.pending_translator_selection.lock() {
+        Ok(mut guard) => Ok(guard.take().unwrap_or_default()),
+        Err(_) => Ok(String::new()),
+    }
+}
+
 /// 使用系统默认浏览器打开外部链接（仅限 https）
 #[tauri::command]
 #[allow(deprecated)]
@@ -1436,8 +1445,43 @@ fn starts_with_list_marker(line: &str) -> bool {
     )
 }
 
+fn starts_with_markdown_heading(line: &str) -> bool {
+    let s = line.trim_start();
+    let hashes = s.chars().take_while(|ch| *ch == '#').count();
+    (1..=6).contains(&hashes) && s.chars().nth(hashes).is_some_and(char::is_whitespace)
+}
+
+fn starts_with_code_fence(line: &str) -> bool {
+    let s = line.trim_start();
+    s.starts_with("```") || s.starts_with("~~~")
+}
+
+fn is_trailing_closer(ch: char) -> bool {
+    matches!(
+        ch,
+        '"' | '\'' | '”' | '’' | '》' | '」' | '』' | '】' | ')' | ']' | '}' | '）'
+    )
+}
+
+fn meaningful_last_char(line: &str) -> Option<char> {
+    line.trim_end()
+        .chars()
+        .rev()
+        .find(|ch| !ch.is_whitespace() && !is_trailing_closer(*ch))
+}
+
+fn meaningful_first_char(line: &str) -> Option<char> {
+    line.trim_start().chars().find(|ch| {
+        !ch.is_whitespace()
+            && !matches!(
+                *ch,
+                '"' | '\'' | '“' | '‘' | '(' | '[' | '{' | '（' | '《' | '「' | '『' | '【'
+            )
+    })
+}
+
 fn ends_with_sentence_punctuation(line: &str) -> bool {
-    line.trim_end().chars().last().is_some_and(|ch| {
+    meaningful_last_char(line).is_some_and(|ch| {
         matches!(
             ch,
             '.' | '?' | '!' | ';' | ':' | '。' | '？' | '！' | '；' | '：'
@@ -1453,6 +1497,9 @@ fn is_structural_ocr_line(line: &str) -> bool {
     starts_with_list_marker(trimmed)
         || trimmed.starts_with('|')
         || trimmed.ends_with('|')
+        || starts_with_markdown_heading(trimmed)
+        || starts_with_code_fence(trimmed)
+        || trimmed.starts_with('>')
         || line.starts_with("  ")
         || line.contains('\t')
         || line.contains("    ")
@@ -1485,6 +1532,253 @@ fn looks_like_label_block(lines: &[String]) -> bool {
         })
         .count();
     short_count * 2 >= lines.len()
+}
+
+fn ascii_word_count(line: &str) -> usize {
+    let mut count = 0usize;
+    let mut in_word = false;
+    for ch in line.chars() {
+        if ch.is_ascii_alphabetic() {
+            if !in_word {
+                count += 1;
+                in_word = true;
+            }
+        } else {
+            in_word = false;
+        }
+    }
+    count
+}
+
+fn last_ascii_word(line: &str) -> Option<String> {
+    let mut word = String::new();
+    for ch in line.trim_end().chars().rev() {
+        if ch.is_ascii_alphabetic() {
+            word.push(ch.to_ascii_lowercase());
+        } else if !word.is_empty() {
+            break;
+        }
+    }
+    if word.is_empty() {
+        None
+    } else {
+        Some(word.chars().rev().collect())
+    }
+}
+
+fn ends_with_continuation_word(line: &str) -> bool {
+    let Some(word) = last_ascii_word(line) else {
+        return false;
+    };
+    matches!(
+        word.as_str(),
+        "a" | "an"
+            | "the"
+            | "and"
+            | "or"
+            | "nor"
+            | "but"
+            | "of"
+            | "to"
+            | "for"
+            | "from"
+            | "with"
+            | "without"
+            | "within"
+            | "into"
+            | "onto"
+            | "on"
+            | "in"
+            | "at"
+            | "by"
+            | "as"
+            | "than"
+            | "that"
+            | "which"
+            | "who"
+            | "whose"
+            | "where"
+            | "when"
+            | "while"
+            | "because"
+            | "since"
+            | "until"
+            | "unless"
+            | "if"
+            | "whether"
+            | "via"
+            | "using"
+            | "including"
+            | "between"
+            | "among"
+            | "about"
+            | "around"
+            | "through"
+            | "over"
+            | "under"
+            | "is"
+            | "are"
+            | "was"
+            | "were"
+            | "be"
+            | "been"
+            | "being"
+            | "have"
+            | "has"
+            | "had"
+            | "do"
+            | "does"
+            | "did"
+            | "can"
+            | "could"
+            | "should"
+            | "would"
+            | "may"
+            | "might"
+            | "must"
+            | "will"
+            | "shall"
+            | "not"
+            | "no"
+            | "both"
+            | "either"
+            | "neither"
+            | "such"
+            | "these"
+            | "those"
+            | "this"
+            | "each"
+            | "every"
+    )
+}
+
+fn ends_with_continuation_punctuation(line: &str) -> bool {
+    meaningful_last_char(line).is_some_and(|ch| {
+        matches!(
+            ch,
+            ',' | '，'
+                | '、'
+                | ';'
+                | '；'
+                | ':'
+                | '：'
+                | '-'
+                | '–'
+                | '—'
+                | '/'
+                | '\\'
+                | '('
+                | '['
+                | '{'
+                | '（'
+                | '《'
+                | '「'
+                | '『'
+                | '【'
+        )
+    })
+}
+
+fn is_hard_sentence_end(line: &str) -> bool {
+    meaningful_last_char(line)
+        .is_some_and(|ch| matches!(ch, '.' | '?' | '!' | '。' | '？' | '！' | '…'))
+}
+
+fn is_short_label_like(line: &str) -> bool {
+    let trimmed = line.trim();
+    !trimmed.is_empty()
+        && trimmed.chars().count() <= 18
+        && ascii_word_count(trimmed) <= 3
+        && !ends_with_sentence_punctuation(trimmed)
+        && !ends_with_continuation_word(trimmed)
+        && !ends_with_continuation_punctuation(trimmed)
+}
+
+fn is_continuation_start(line: &str) -> bool {
+    meaningful_first_char(line).is_some_and(|ch| {
+        ch.is_ascii_lowercase()
+            || ch.is_ascii_digit()
+            || matches!(
+                ch,
+                ',' | '.'
+                    | ';'
+                    | ':'
+                    | '?'
+                    | '!'
+                    | ')'
+                    | ']'
+                    | '}'
+                    | '%'
+                    | '，'
+                    | '。'
+                    | '；'
+                    | '：'
+                    | '？'
+                    | '！'
+                    | '、'
+                    | '）'
+                    | '》'
+                    | '」'
+                    | '』'
+                    | '】'
+            )
+    })
+}
+
+fn is_single_prose_block(block: &str) -> bool {
+    let trimmed = block.trim();
+    !trimmed.is_empty()
+        && !trimmed.contains('\n')
+        && !is_structural_ocr_line(trimmed)
+        && !starts_with_list_marker(trimmed)
+}
+
+fn should_merge_ocr_blocks(prev: &str, next: &str) -> bool {
+    let prev = prev.trim();
+    let next = next.trim();
+    if !is_single_prose_block(prev) || !is_single_prose_block(next) {
+        return false;
+    }
+    if starts_with_list_marker(next)
+        || starts_with_markdown_heading(next)
+        || starts_with_code_fence(next)
+        || next.starts_with('|')
+    {
+        return false;
+    }
+    if is_hard_sentence_end(prev) {
+        return false;
+    }
+
+    let explicit_continuation =
+        ends_with_continuation_punctuation(prev) || ends_with_continuation_word(prev);
+    if explicit_continuation {
+        return true;
+    }
+
+    if is_short_label_like(prev) || is_probable_heading(prev, Some(next)) {
+        return false;
+    }
+
+    !ends_with_sentence_punctuation(prev) && is_continuation_start(next)
+}
+
+fn repair_ocr_paragraph_breaks(blocks: Vec<String>) -> Vec<String> {
+    let mut repaired: Vec<String> = Vec::new();
+    for block in blocks {
+        let block = block.trim().to_string();
+        if block.is_empty() {
+            continue;
+        }
+        if let Some(prev) = repaired.last_mut() {
+            if should_merge_ocr_blocks(prev, &block) {
+                append_ocr_line(prev, &block);
+                continue;
+            }
+        }
+        repaired.push(block);
+    }
+    repaired
 }
 
 fn append_ocr_line(target: &mut String, line: &str) {
@@ -1668,7 +1962,8 @@ fn normalize_ocr_text(raw: &str) -> String {
         }
     }
 
-    normalize_english_punctuation_spacing(&blocks.join("\n\n"))
+    let repaired = repair_ocr_paragraph_breaks(blocks);
+    normalize_english_punctuation_spacing(&repaired.join("\n\n"))
 }
 
 async fn system_ocr_text(
@@ -2608,7 +2903,7 @@ fn trigger_hotkey_action(app: &AppHandle, action: HotkeyAction) {
     }
     eprintln!("[hotkey] trigger {action:?}");
     match action {
-        HotkeyAction::Translator => toggle_main_window(app),
+        HotkeyAction::Translator => toggle_main_window_with_selection(app),
         HotkeyAction::ScreenshotTranslation => {
             let handle = app.clone();
             tauri::async_runtime::spawn(async move {
@@ -2794,6 +3089,70 @@ fn get_mouse_position(app: &AppHandle) -> Option<tauri::PhysicalPosition<f64>> {
     app.cursor_position().ok()
 }
 
+fn monitor_contains_physical_point(
+    monitor: &tauri::Monitor,
+    point: tauri::PhysicalPosition<f64>,
+) -> bool {
+    let mp = monitor.position();
+    let ms = monitor.size();
+    let right = mp.x + ms.width as i32;
+    let bottom = mp.y + ms.height as i32;
+    (point.x as i32) >= mp.x
+        && (point.x as i32) < right
+        && (point.y as i32) >= mp.y
+        && (point.y as i32) < bottom
+}
+
+fn clamp_axis_to_monitor(start: i32, min: i32, max: i32, size: i32) -> i32 {
+    if max - min <= size {
+        return min;
+    }
+    start.clamp(min, max - size)
+}
+
+/// 普通翻译悬浮窗初始位置：靠近鼠标，但完整落在当前显示器内。
+/// 只用于打开瞬间；用户之后手动拖动窗口时不做任何边界限制。
+fn translator_popup_position(
+    app: &AppHandle,
+    window: &WebviewWindow,
+) -> Option<tauri::PhysicalPosition<i32>> {
+    const OFFSET: f64 = 10.0;
+    const EDGE_MARGIN: i32 = 8;
+    const FALLBACK_LOGICAL_W: f64 = 600.0;
+    const FALLBACK_LOGICAL_H: f64 = 420.0;
+
+    let cursor = get_mouse_position(app)?;
+    let monitors = app.available_monitors().ok()?;
+    let monitor = monitors
+        .iter()
+        .find(|monitor| monitor_contains_physical_point(monitor, cursor))
+        .or_else(|| monitors.first())?;
+    let mp = monitor.position();
+    let ms = monitor.size();
+    let scale = monitor.scale_factor();
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
+    let size = window.outer_size().ok();
+    let width = size
+        .map(|s| s.width as i32)
+        .unwrap_or_else(|| (FALLBACK_LOGICAL_W * scale).round() as i32)
+        .max(1);
+    let height = size
+        .map(|s| s.height as i32)
+        .unwrap_or_else(|| (FALLBACK_LOGICAL_H * scale).round() as i32)
+        .max(1);
+    let left = mp.x + EDGE_MARGIN;
+    let top = mp.y + EDGE_MARGIN;
+    let right = mp.x + ms.width as i32 - EDGE_MARGIN;
+    let bottom = mp.y + ms.height as i32 - EDGE_MARGIN;
+    let x = clamp_axis_to_monitor((cursor.x + OFFSET).round() as i32, left, right, width);
+    let y = clamp_axis_to_monitor((cursor.y + OFFSET).round() as i32, top, bottom, height);
+    Some(tauri::PhysicalPosition::new(x, y))
+}
+
 /// Windows 平台：截取指定区域的屏幕图像
 /// 需要将逻辑坐标根据缩放因子转换为物理坐标，再转换为相对于显示器的相对坐标
 #[cfg(target_os = "windows")]
@@ -2921,6 +3280,33 @@ fn capture_region_image(
 /// 切换主窗口显示/隐藏
 /// 隐藏时直接隐藏；显示时窗口跟随鼠标位置偏移 (10,10) 弹出，翻译器保持置顶
 fn toggle_main_window(app: &AppHandle) {
+    toggle_main_window_internal(app, false);
+}
+
+/// 翻译热键入口：显示窗口前先抓取当前前台 App 的选中文本。
+fn toggle_main_window_with_selection(app: &AppHandle) {
+    toggle_main_window_internal(app, true);
+}
+
+fn toggle_main_window_internal(app: &AppHandle, capture_selection: bool) {
+    if let Some(existing) = get_main_window(app) {
+        if existing.is_visible().unwrap_or(false) {
+            let _ = existing.hide();
+            return;
+        }
+    }
+
+    let pending_selection = if capture_selection {
+        capture_active_selection()
+    } else {
+        None
+    };
+
+    let state = app.state::<AppState>();
+    if let Ok(mut guard) = state.pending_translator_selection.lock() {
+        *guard = pending_selection;
+    }
+
     let window = match ensure_main_window(app) {
         Ok(window) => window,
         Err(err) => {
@@ -2929,22 +3315,15 @@ fn toggle_main_window(app: &AppHandle) {
         }
     };
 
-    let visible = window.is_visible().unwrap_or(false);
-    if visible {
-        let _ = window.hide();
-        return;
-    }
-
     let _ = window.set_always_on_top(true);
 
     // 重置 hash 为翻译模式，防止之前打开过设置导致显示设置界面
     let _ = window.eval(
         "window.location.hash = ''; window.dispatchEvent(new HashChangeEvent('hashchange'));",
     );
+    let _ = window.set_size(tauri::LogicalSize::new(600.0, 420.0));
 
-    let pos = get_mouse_position(app).map(|cursor| {
-        tauri::PhysicalPosition::new((cursor.x + 10.0) as i32, (cursor.y + 10.0) as i32)
-    });
+    let pos = translator_popup_position(app, &window);
 
     #[cfg(target_os = "macos")]
     {
@@ -3639,6 +4018,7 @@ fn main() {
                 lens_busy: AtomicBool::new(false),
                 explain_stream_generation: AtomicU64::new(0),
                 pending_selection: Mutex::new(None),
+                pending_translator_selection: Mutex::new(None),
                 key_cooldowns: Mutex::new(HashMap::new()),
                 active_key_idx: Mutex::new(HashMap::new()),
                 baidu_ocr_tokens: Mutex::new(HashMap::new()),
@@ -3699,6 +4079,7 @@ fn main() {
             lens_set_hit_region,
             lens_set_ignore_cursor_events,
             take_lens_selection,
+            take_translator_selection,
             lens_commit_image_to_history,
             lens_delete_history_image,
             check_github_latest_release,
@@ -3733,12 +4114,52 @@ mod tests {
     }
 
     #[test]
+    fn normalize_ocr_text_repairs_false_paragraph_break_before_proper_noun() {
+        let raw = "Prompt Optimizer is a powerful AI prompt optimization tool that helps you write better AI prompts and improve the quality of AI outputs. It supports four usage methods: web application, desktop application, Chrome extension, and\n\nDocker deployment.";
+        assert_eq!(
+            normalize_ocr_text(raw),
+            "Prompt Optimizer is a powerful AI prompt optimization tool that helps you write better AI prompts and improve the quality of AI outputs. It supports four usage methods: web application, desktop application, Chrome extension, and Docker deployment."
+        );
+    }
+
+    #[test]
+    fn normalize_ocr_text_repairs_false_paragraph_break_before_lowercase_continuation() {
+        let raw =
+            "This paragraph was split by OCR\n\nbecause the visual line wrapped across two rows.";
+        assert_eq!(
+            normalize_ocr_text(raw),
+            "This paragraph was split by OCR because the visual line wrapped across two rows."
+        );
+    }
+
+    #[test]
+    fn normalize_ocr_text_repairs_false_paragraph_break_after_colon() {
+        let raw = "It supports the following runtime targets:\n\nWindows, macOS, and Linux.";
+        assert_eq!(
+            normalize_ocr_text(raw),
+            "It supports the following runtime targets: Windows, macOS, and Linux."
+        );
+    }
+
+    #[test]
+    fn normalize_ocr_text_preserves_headings_and_complete_paragraphs() {
+        let heading = "Prompt Optimizer\n\nDocker deployment is supported.";
+        assert_eq!(normalize_ocr_text(heading), heading);
+
+        let complete = "The first paragraph is complete.\n\nDocker deployment is supported.";
+        assert_eq!(normalize_ocr_text(complete), complete);
+    }
+
+    #[test]
     fn normalize_ocr_text_preserves_lists_and_label_blocks() {
         let list = "1. First item\n2. Second item";
         assert_eq!(normalize_ocr_text(list), list);
 
         let labels = "File\nEdit\nView\nHelp";
         assert_eq!(normalize_ocr_text(labels), labels);
+
+        let introduced_list = "Supported methods:\n\n1. Web\n2. Desktop";
+        assert_eq!(normalize_ocr_text(introduced_list), introduced_list);
     }
 
     #[test]

@@ -15,6 +15,9 @@ type Stage = 'select' | 'ready' | 'answering' | 'translating' | 'translated'
 type Mode = 'chat' | 'translate'
 type SpeechTarget = 'original' | 'translated'
 type ScreenshotOcrMethod = NonNullable<Settings['screenshotTranslation']['ocrMethod']>
+type ScreenshotTranslationMethod = NonNullable<Settings['screenshotTranslation']['translationMethod']>
+
+const APPLE_INTELLIGENCE_BASE_URL = 'applefoundation://local'
 
 /** 解析 webview hash query：'#lens?mode=translate' → 'translate' */
 function readModeFromHash(): Mode {
@@ -33,6 +36,81 @@ function resolveLensModelLabel(settings: Settings): string {
 function resolveScreenshotOcrMethod(settings: Settings): ScreenshotOcrMethod {
   return settings.screenshotTranslation?.ocrMethod
     || (settings.screenshotTranslation?.useSystemOcr ? 'system' : 'ai')
+}
+
+function resolveScreenshotTranslationMethod(settings: Settings): ScreenshotTranslationMethod {
+  return settings.screenshotTranslation?.translationMethod || 'ai'
+}
+
+function providerKeyConfigError(
+  settings: Settings,
+  providerId: string,
+  missingProvider: string,
+  missingKey: string,
+): string {
+  const provider = settings.providers.find(p => p.id === providerId.trim())
+  if (!provider) return missingProvider
+  if (provider.baseUrl === APPLE_INTELLIGENCE_BASE_URL) return ''
+  return provider.apiKeys.some(key => key.trim()) ? '' : missingKey
+}
+
+function ocrConfigError(settings: Settings, method: ScreenshotOcrMethod, lang: Lang): string {
+  const zh = lang === 'zh'
+  const st = settings.screenshotTranslation
+  if (method === 'baidu') {
+    const cfg = st.baiduOcr
+    if (!cfg?.apiKey?.trim() || !cfg?.secretKey?.trim()) {
+      return zh
+        ? '请先在设置中配置百度 OCR API Key 和 Secret Key。'
+        : 'Configure the Baidu OCR API Key and Secret Key in Settings first.'
+    }
+  }
+  if (method === 'ai') {
+    return providerKeyConfigError(
+      settings,
+      st.providerId || '',
+      zh ? '请先在设置中选择可用的 AI OCR 接口。' : 'Choose an available AI OCR provider in Settings first.',
+      zh ? '请先在设置中为 AI OCR 接口配置 API 密钥。' : 'Configure an API key for the AI OCR provider in Settings first.',
+    )
+  }
+  return ''
+}
+
+function translationConfigError(settings: Settings, method: ScreenshotTranslationMethod, lang: Lang): string {
+  const zh = lang === 'zh'
+  const st = settings.screenshotTranslation
+  if (method === 'ai') {
+    return providerKeyConfigError(
+      settings,
+      st.translateProviderId || st.providerId || '',
+      zh ? '请先在设置中选择可用的 AI 翻译接口。' : 'Choose an available AI translation provider in Settings first.',
+      zh ? '请先在设置中为 AI 翻译接口配置 API 密钥。' : 'Configure an API key for the AI translation provider in Settings first.',
+    )
+  }
+  if (method === 'baidu') {
+    const cfg = st.baiduTranslate
+    if (!cfg?.appId?.trim() || !cfg?.appKey?.trim()) {
+      return zh
+        ? '请先在设置中配置百度翻译 APP ID 和 APP Key。'
+        : 'Configure the Baidu Translate APP ID and APP Key in Settings first.'
+    }
+  }
+  if (method === 'tencent') {
+    const cfg = st.tencentTranslate
+    if (!cfg?.secretId?.trim() || !cfg?.secretKey?.trim()) {
+      return zh
+        ? '请先在设置中配置腾讯云 SecretId 和 SecretKey。'
+        : 'Configure the Tencent Cloud SecretId and SecretKey in Settings first.'
+    }
+  }
+  if (method === 'caiyun2') {
+    if (!st.caiyunTranslate?.token?.trim()) {
+      return zh
+        ? '请先在设置中配置彩云小译 Token。'
+        : 'Configure the Caiyun token in Settings first.'
+    }
+  }
+  return ''
 }
 
 function formatLensAsking(template: string, model: string): string {
@@ -834,6 +912,7 @@ export default function Lens() {
   const [mode, setMode] = useState<Mode>(() => readModeFromHash())
   // translate 模式专用：OCR 原文 + 翻译结果 + 计时
   const [translateOriginal, setTranslateOriginal] = useState('')
+  const [translateOriginalError, setTranslateOriginalError] = useState('')
   const [translateText, setTranslateText] = useState('')
   const [translateError, setTranslateError] = useState('')
   const [translateDurationMs, setTranslateDurationMs] = useState<number | null>(null)
@@ -841,12 +920,18 @@ export default function Lens() {
   const [translateRetranslating, setTranslateRetranslating] = useState(false)
   const [translateCardHeight, setTranslateCardHeight] = useState<number | null>(null)
   const [translateOcrMethod, setTranslateOcrMethod] = useState<ScreenshotOcrMethod>('ai')
+  const [translateMethod, setTranslateMethod] = useState<ScreenshotTranslationMethod>('ai')
+  const [ocrMethodSwitching, setOcrMethodSwitching] = useState(false)
+  const [translationMethodSwitching, setTranslationMethodSwitching] = useState(false)
   const [translateNow, setTranslateNow] = useState(() => Date.now())
   const translateStartRef = useRef<number | null>(null)
   const translateEditDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const translateEditSeqRef = useRef(0)
   const translateOriginalEditedRef = useRef(false)
   const ignoreTranslateStreamRef = useRef(false)
+  const showTranslateOriginalRef = useRef(true)
+  const translateOriginalRef = useRef('')
+  const translateTextRef = useRef('')
   // viewport 大小：监听 resize（拔显示器/系统缩放变化都会触发），所有相对尺寸由此重算
   const [viewport, setViewport] = useState(() => ({
     w: typeof window !== 'undefined' ? window.innerWidth : 1280,
@@ -934,6 +1019,9 @@ export default function Lens() {
   stageRef.current = stage
   modeRef.current = mode
   historyOpenRef.current = historyOpen
+  showTranslateOriginalRef.current = showTranslateOriginal
+  translateOriginalRef.current = translateOriginal
+  translateTextRef.current = translateText
 
   const stopSpeechPlayback = useCallback(() => {
     speechSeqRef.current += 1
@@ -979,6 +1067,7 @@ export default function Lens() {
         if (curMode === 'translate') {
           setShowTranslateOriginal(!(settings.screenshotTranslation?.directTranslate ?? false))
           setTranslateOcrMethod(resolveScreenshotOcrMethod(settings))
+          setTranslateMethod(resolveScreenshotTranslationMethod(settings))
         }
       } catch (err) { console.error('Failed to load settings', err) }
     })()
@@ -1061,6 +1150,7 @@ export default function Lens() {
       if (curMode === 'translate') {
         setShowTranslateOriginal(!(settings.screenshotTranslation?.directTranslate ?? false))
         setTranslateOcrMethod(resolveScreenshotOcrMethod(settings))
+        setTranslateMethod(resolveScreenshotTranslationMethod(settings))
       }
     } catch (err) { console.error('Failed to reload settings', err) }
     // 防御：reset 流程会 setMessages([]) + setStreaming(false)，理论上 messages.length===0 effect 不会进
@@ -1093,10 +1183,13 @@ export default function Lens() {
       setStreaming(false)
       setCopiedTarget(null)
       setTranslateOriginal('')
+      setTranslateOriginalError('')
       setTranslateText('')
       setTranslateError('')
       setTranslateDurationMs(null)
       setTranslateRetranslating(false)
+      setOcrMethodSwitching(false)
+      setTranslationMethodSwitching(false)
       const w = window.innerWidth
       const h = window.innerHeight
       setViewport({ w, h })
@@ -1360,10 +1453,13 @@ export default function Lens() {
       setStreaming(false)
       setCopiedTarget(null)
       setTranslateOriginal('')
+      setTranslateOriginalError('')
       setTranslateText('')
       setTranslateError('')
       setTranslateDurationMs(null)
       setTranslateRetranslating(false)
+      setOcrMethodSwitching(false)
+      setTranslationMethodSwitching(false)
       setBarRect(computeSelectBar(viewport.w, viewport.h, metrics))
       setCapturedFrame(null)
       setBarIntro(false)
@@ -1760,17 +1856,24 @@ export default function Lens() {
     translateOriginalEditedRef.current = false
     ignoreTranslateStreamRef.current = false
     setTranslateOriginal('')
+    setTranslateOriginalError('')
     setTranslateText('')
     setTranslateError('')
     setTranslateDurationMs(null)
     setTranslateRetranslating(false)
     translateStartRef.current = Date.now()
     setTranslateNow(Date.now())
+    setStage('translating')
     try {
       const r = await api.lensTranslate(id)
       if (!r.success) {
         // 失败兜底：done 事件应该已经带 error 了，但补一刀防止前端漏 done
-        setTranslateError(r.error || 'Failed')
+        const message = r.error || 'Failed'
+        if (!showTranslateOriginalRef.current || translateOriginalRef.current.trim() || translateTextRef.current.trim()) {
+          setTranslateError(message)
+        } else {
+          setTranslateOriginalError(message)
+        }
         if (translateStartRef.current !== null) {
           setTranslateDurationMs(Date.now() - translateStartRef.current)
           translateStartRef.current = null
@@ -1779,7 +1882,12 @@ export default function Lens() {
       }
       // 成功路径：等 lens-translate-stream 的 done 事件触发 stage / 计时（避免事件还没到 stage 就跳，或反之文字还没到完成态）
     } catch (err) {
-      setTranslateError(err instanceof Error ? err.message : String(err))
+      const message = err instanceof Error ? err.message : String(err)
+      if (!showTranslateOriginalRef.current || translateOriginalRef.current.trim() || translateTextRef.current.trim()) {
+        setTranslateError(message)
+      } else {
+        setTranslateOriginalError(message)
+      }
       if (translateStartRef.current !== null) {
         setTranslateDurationMs(Date.now() - translateStartRef.current)
         translateStartRef.current = null
@@ -1802,6 +1910,7 @@ export default function Lens() {
       translateEditDebounceRef.current = null
     }
     setTranslateOriginal(normalizedValue)
+    setTranslateOriginalError('')
     setTranslateText('')
     setTranslateError('')
     setTranslateDurationMs(null)
@@ -1881,6 +1990,208 @@ export default function Lens() {
     }
   }, [showTranslateOriginal, translateOriginal])
 
+  const saveScreenshotTranslationSettings = useCallback(async (
+    updates: Partial<Settings['screenshotTranslation']>,
+  ): Promise<Settings> => {
+    const current = await api.getSettings()
+    const next = {
+      ...current,
+      screenshotTranslation: {
+        ...current.screenshotTranslation,
+        ...updates,
+      },
+    }
+    await api.saveSettings(next)
+    return next
+  }, [])
+
+  const runTranslateTextNow = useCallback(async (sourceText = translateOriginal) => {
+    const source = normalizeEnglishPunctuationSpacing(sourceText).trim()
+    if (translateEditDebounceRef.current) {
+      clearTimeout(translateEditDebounceRef.current)
+      translateEditDebounceRef.current = null
+    }
+    const seq = ++translateEditSeqRef.current
+    translateOriginalEditedRef.current = true
+    ignoreTranslateStreamRef.current = true
+    void api.lensCancelStream().catch(err => console.error('[lens-translate] cancel stream failed:', err))
+
+    if (!source) {
+      setTranslateText('')
+      setTranslateError('')
+      setTranslateDurationMs(null)
+      setTranslateRetranslating(false)
+      translateStartRef.current = null
+      setStage('translated')
+      return
+    }
+
+    setTranslateText('')
+    setTranslateError('')
+    setTranslateDurationMs(null)
+    setTranslateRetranslating(true)
+    translateStartRef.current = Date.now()
+    setTranslateNow(Date.now())
+    setStage('translating')
+
+    try {
+      const result = await api.lensTranslateText(source)
+      if (seq === translateEditSeqRef.current) {
+        if (result.success) {
+          setTranslateError('')
+          setTranslateText(normalizeEnglishPunctuationSpacing(result.translated || ''))
+        } else {
+          setTranslateError(result.error || 'Failed')
+          setTranslateText('')
+        }
+      }
+    } catch (err) {
+      if (seq === translateEditSeqRef.current) {
+        setTranslateError(err instanceof Error ? err.message : String(err))
+        setTranslateText('')
+      }
+    } finally {
+      if (seq === translateEditSeqRef.current) {
+        if (translateStartRef.current !== null) {
+          setTranslateDurationMs(Date.now() - translateStartRef.current)
+          translateStartRef.current = null
+        }
+        setTranslateRetranslating(false)
+        setStage('translated')
+      }
+    }
+  }, [translateOriginal])
+
+  const handleOcrMethodSelect = useCallback(async (value: string) => {
+    const method = value as ScreenshotOcrMethod
+    if (method === translateOcrMethod) return
+    if (ocrMethodSwitching || translationMethodSwitching) return
+    stopSpeechPlayback()
+    setOcrMethodSwitching(true)
+    try {
+      await api.lensCancelStream().catch(err => console.error('[lens-translate] cancel stream failed:', err))
+      ignoreTranslateStreamRef.current = true
+      const settings = await saveScreenshotTranslationSettings({
+        ocrMethod: method,
+        useSystemOcr: method === 'system',
+      })
+      setTranslateOcrMethod(method)
+
+      if (translateEditDebounceRef.current) {
+        clearTimeout(translateEditDebounceRef.current)
+        translateEditDebounceRef.current = null
+      }
+      translateEditSeqRef.current++
+      translateOriginalEditedRef.current = false
+      ignoreTranslateStreamRef.current = false
+      translateStartRef.current = null
+      setTranslateOriginal('')
+      setTranslateText('')
+      setTranslateError('')
+      setTranslateDurationMs(null)
+      setTranslateRetranslating(false)
+
+      const configError = ocrConfigError(settings, method, lang)
+      setTranslateOriginalError(showTranslateOriginalRef.current ? configError : '')
+      if (!showTranslateOriginalRef.current) setTranslateError(configError)
+      if (configError) {
+        setStage('translated')
+        return
+      }
+
+      const imageId = imageIdRef.current
+      if (!imageId) {
+        const message = lang === 'zh' ? '请先截图后再切换 OCR 接口。' : 'Capture a screenshot before switching OCR providers.'
+        if (showTranslateOriginalRef.current) setTranslateOriginalError(message)
+        else setTranslateError(message)
+        setStage('translated')
+        return
+      }
+      await runTranslate(imageId)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      if (showTranslateOriginalRef.current) {
+        setTranslateOriginalError(message)
+        setTranslateError('')
+      } else {
+        setTranslateError(message)
+      }
+      setTranslateText('')
+      setTranslateRetranslating(false)
+      translateStartRef.current = null
+      setStage('translated')
+    } finally {
+      setOcrMethodSwitching(false)
+    }
+  }, [
+    lang,
+    ocrMethodSwitching,
+    runTranslate,
+    saveScreenshotTranslationSettings,
+    stopSpeechPlayback,
+    translateOcrMethod,
+    translationMethodSwitching,
+  ])
+
+  const handleTranslationMethodSelect = useCallback(async (value: string) => {
+    const method = value as ScreenshotTranslationMethod
+    if (method === translateMethod) return
+    if (ocrMethodSwitching || translationMethodSwitching) return
+    stopSpeechPlayback()
+    setTranslationMethodSwitching(true)
+    try {
+      await api.lensCancelStream().catch(err => console.error('[lens-translate] cancel stream failed:', err))
+      ignoreTranslateStreamRef.current = true
+      const settings = await saveScreenshotTranslationSettings({ translationMethod: method })
+      setTranslateMethod(method)
+
+      if (translateEditDebounceRef.current) {
+        clearTimeout(translateEditDebounceRef.current)
+        translateEditDebounceRef.current = null
+      }
+      translateEditSeqRef.current++
+      translateStartRef.current = null
+      setTranslateText('')
+      setTranslateError('')
+      setTranslateDurationMs(null)
+      setTranslateRetranslating(false)
+
+      const configError = translationConfigError(settings, method, lang)
+      if (configError) {
+        setTranslateError(configError)
+        setStage('translated')
+        return
+      }
+
+      const source = translateOriginalRef.current
+      if (source.trim()) {
+        await runTranslateTextNow(source)
+      } else if (imageIdRef.current && !translateOriginalError) {
+        await runTranslate(imageIdRef.current)
+      } else {
+        setStage('translated')
+      }
+    } catch (err) {
+      setTranslateError(err instanceof Error ? err.message : String(err))
+      setTranslateText('')
+      setTranslateRetranslating(false)
+      translateStartRef.current = null
+      setStage('translated')
+    } finally {
+      setTranslationMethodSwitching(false)
+    }
+  }, [
+    lang,
+    runTranslate,
+    runTranslateTextNow,
+    saveScreenshotTranslationSettings,
+    stopSpeechPlayback,
+    ocrMethodSwitching,
+    translateMethod,
+    translateOriginalError,
+    translationMethodSwitching,
+  ])
+
   // lens-translate-stream 事件监听（与 lens-stream 同款 cancelled 旗标处理 StrictMode 双挂）
   useEffect(() => {
     let cancelled = false
@@ -1889,7 +2200,13 @@ export default function Lens() {
       if (payload.imageId !== imageIdRef.current) return
       if (ignoreTranslateStreamRef.current) return
       if (payload.done) {
-        if (payload.error) setTranslateError(payload.error)
+        if (payload.error) {
+          if (!showTranslateOriginalRef.current || translateOriginalRef.current.trim() || translateTextRef.current.trim()) {
+            setTranslateError(payload.error)
+          } else {
+            setTranslateOriginalError(payload.error)
+          }
+        }
         if (translateStartRef.current !== null) {
           setTranslateDurationMs(Date.now() - translateStartRef.current)
           translateStartRef.current = null
@@ -1899,6 +2216,7 @@ export default function Lens() {
       }
       if (!payload.delta) return
       if (payload.kind === 'original') {
+        setTranslateOriginalError('')
         setTranslateOriginal(prev => normalizeEnglishPunctuationSpacing(prev + payload.delta))
       } else if (payload.kind === 'translated') {
         setTranslateText(prev => normalizeEnglishPunctuationSpacing(prev + payload.delta))
@@ -2290,6 +2608,25 @@ export default function Lens() {
   // translate 浮动卡片：截图后在选区旁出现，加载/完成两态
   const showTranslateCard = mode === 'translate' && (stage === 'translating' || stage === 'translated')
   const readonlyAiOcrOriginal = translateOcrMethod === 'ai'
+  const methodSwitching = ocrMethodSwitching || translationMethodSwitching
+  const methodSelectClass = 'ml-auto shrink-0 h-5 max-w-[122px] rounded-md border border-black/[0.06] bg-white/80 px-1.5 text-[10.5px] font-medium text-neutral-500 outline-none hover:text-neutral-700 hover:border-black/[0.12] disabled:opacity-60 dark:border-white/[0.08] dark:bg-neutral-900/70 dark:text-neutral-400 dark:hover:text-neutral-100 dark:hover:border-white/[0.14]'
+  const ocrMethodOptions = useMemo<{ value: ScreenshotOcrMethod; label: string }[]>(() => [
+    { value: 'ai', label: t.screenshotOcrAI },
+    { value: 'baidu', label: t.screenshotOcrBaidu },
+    { value: 'chaoxing', label: t.screenshotOcrChaoxing },
+    { value: 'system', label: t.screenshotOcrSystem },
+  ], [t])
+  const translationMethodOptions = useMemo<{ value: ScreenshotTranslationMethod; label: string }[]>(() => [
+    { value: 'ai', label: t.screenshotTranslationAI },
+    { value: 'google', label: t.screenshotTranslationGoogle },
+    { value: 'baidu', label: t.screenshotTranslationBaidu },
+    { value: 'tencent', label: t.screenshotTranslationTencent },
+    { value: 'bing', label: t.screenshotTranslationBing },
+    { value: 'bing2', label: t.screenshotTranslationBing2 },
+    { value: 'yandex', label: t.screenshotTranslationYandex },
+    { value: 'caiyun2', label: t.screenshotTranslationCaiyun2 },
+    { value: 'microsoft', label: t.screenshotTranslationMicrosoft },
+  ], [t])
   // 浮动布局生效条件：原生窗口已经真的缩成浮动模式。
   // 没截图就直接提问的场景下，window 还是全屏 overlay、bar 还在底部居中，此时仍按全屏布局走。
   const isFloatingLayout = floatingRebased && capturedFrame !== null && stage !== 'select'
@@ -2319,10 +2656,14 @@ export default function Lens() {
     showTranslateOriginal,
     stableAnswerHeight,
     translateError,
+    translateOriginalError,
+    translateMethod,
     translateOriginal,
     translateOcrMethod,
     translateRetranslating,
     translateText,
+    ocrMethodSwitching,
+    translationMethodSwitching,
   ])
 
   useEffect(() => {
@@ -2507,9 +2848,14 @@ export default function Lens() {
     stableAnswerHeight,
     streaming,
     translateError,
+    translateOriginalError,
+    translateMethod,
     translateOriginal,
+    translateOcrMethod,
     translateRetranslating,
     translateText,
+    ocrMethodSwitching,
+    translationMethodSwitching,
   ])
 
   useEffect(() => {
@@ -2697,7 +3043,7 @@ export default function Lens() {
     if (stageRef.current === 'select' || barRebaseHidden) return
 
     const target = e.target as HTMLElement | null
-    if (target?.closest('input, textarea, button, a, [contenteditable="true"]')) return
+    if (target?.closest('input, textarea, select, button, a, [contenteditable="true"]')) return
 
     e.preventDefault()
     e.stopPropagation()
@@ -3297,6 +3643,7 @@ export default function Lens() {
                     <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-neutral-400 dark:text-neutral-500">
                       {t.shotOriginal}
                     </span>
+                    {ocrMethodSwitching && <Loader2 size={10} className="shrink-0 animate-spin text-neutral-400 dark:text-neutral-500" />}
                     {translateOriginal && (
                       <>
                         <button
@@ -3327,8 +3674,24 @@ export default function Lens() {
                         )}
                       </>
                     )}
+                    <select
+                      value={translateOcrMethod}
+                      disabled={methodSwitching}
+                      onChange={(e) => void handleOcrMethodSelect(e.target.value)}
+                      title={t.screenshotOcrMethod}
+                      aria-label={t.screenshotOcrMethod}
+                      className={methodSelectClass}
+                    >
+                      {ocrMethodOptions.map(option => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                      ))}
+                    </select>
                   </div>
-                  {translateOriginal || translateOriginalEditedRef.current ? readonlyAiOcrOriginal ? (
+                  {translateOriginalError ? (
+                    <div className="text-[12.5px] text-red-500 leading-6 whitespace-pre-wrap break-words">
+                      {translateOriginalError}
+                    </div>
+                  ) : translateOriginal || translateOriginalEditedRef.current ? readonlyAiOcrOriginal ? (
                     <ReadonlyOcrMarkdownText text={translateOriginal} />
                   ) : (
                     <EditableOcrText
@@ -3353,7 +3716,7 @@ export default function Lens() {
                 <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-neutral-400 dark:text-neutral-500">
                   {t.shotTranslated}
                 </span>
-                {translateRetranslating && (
+                {(translateRetranslating || translationMethodSwitching) && (
                   <span className="flex items-center gap-1 text-[10.5px] text-neutral-400 dark:text-neutral-500">
                     <Loader2 size={10} className="animate-spin" />
                     {t.shotTranslating}
@@ -3387,6 +3750,18 @@ export default function Lens() {
                     </button>
                   </>
                 )}
+                <select
+                  value={translateMethod}
+                  disabled={methodSwitching}
+                  onChange={(e) => void handleTranslationMethodSelect(e.target.value)}
+                  title={t.screenshotTranslationMethod}
+                  aria-label={t.screenshotTranslationMethod}
+                  className={methodSelectClass}
+                >
+                  {translationMethodOptions.map(option => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
               </div>
               {translateText && (
                 readonlyAiOcrOriginal ? (
@@ -3402,7 +3777,7 @@ export default function Lens() {
                   {t.lensError}: {translateError}
                 </div>
               )}
-              {!translateText && !translateError && (!translateOriginalEditedRef.current || translateRetranslating) && (
+              {!translateText && !translateError && !translateOriginalError && (!translateOriginalEditedRef.current || translateRetranslating) && (
                 <div className="space-y-2">
                   <div className="h-3.5 rounded bg-gradient-to-r from-neutral-200 via-neutral-100 to-neutral-200 dark:from-neutral-800 dark:via-neutral-700 dark:to-neutral-800 bg-[length:200%_100%] animate-[shimmer_1.4s_linear_infinite]" />
                   <div className="h-3.5 rounded bg-gradient-to-r from-neutral-200 via-neutral-100 to-neutral-200 dark:from-neutral-800 dark:via-neutral-700 dark:to-neutral-800 bg-[length:200%_100%] animate-[shimmer_1.4s_linear_infinite] w-[88%]" />

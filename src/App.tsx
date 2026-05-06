@@ -1,11 +1,13 @@
-import { lazy, Suspense, useState, useEffect, useRef } from 'react'
+import { lazy, Suspense, useState, useEffect, useRef, useCallback } from 'react'
 import { Settings as SettingsIcon, Cpu, Loader2 } from 'lucide-react'
-import { api } from './api/tauri'
+import { api, type Settings } from './api/tauri'
 import { i18n, type Lang } from './settings/i18n'
 import './index.css'
 
 const Settings = lazy(() => import('./Settings'))
 const Lens = lazy(() => import('./Lens'))
+
+type TranslationMethod = NonNullable<Settings['screenshotTranslation']['translationMethod']>
 
 const TRANSLATOR_WINDOW_W = 600
 const TRANSLATOR_WINDOW_H = 420
@@ -28,21 +30,108 @@ function Translator({
   const [input, setInput] = useState('')
   const [result, setResult] = useState('')
   const [loading, setLoading] = useState(false)
+  const [translationMethod, setTranslationMethod] = useState<TranslationMethod>('ai')
+  const [methodSwitching, setMethodSwitching] = useState(false)
   const resultRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const translateSeq = useRef(0)
+  const skipNextDebouncedInputRef = useRef<string | null>(null)
   const t = i18n[lang]
+  const translationMethodOptions: { value: TranslationMethod; label: string }[] = [
+    { value: 'ai', label: t.screenshotTranslationAI },
+    { value: 'google', label: t.screenshotTranslationGoogle },
+    { value: 'baidu', label: t.screenshotTranslationBaidu },
+    { value: 'tencent', label: t.screenshotTranslationTencent },
+    { value: 'bing', label: t.screenshotTranslationBing },
+    { value: 'bing2', label: t.screenshotTranslationBing2 },
+    { value: 'yandex', label: t.screenshotTranslationYandex },
+    { value: 'caiyun2', label: t.screenshotTranslationCaiyun2 },
+    { value: 'microsoft', label: t.screenshotTranslationMicrosoft },
+  ]
+  const methodSelectClass = 'ml-auto shrink-0 h-5 max-w-[122px] rounded-md border border-black/[0.06] bg-white/80 px-1.5 text-[10.5px] font-medium text-neutral-500 outline-none hover:text-neutral-700 hover:border-black/[0.12] disabled:opacity-60 dark:border-white/[0.08] dark:bg-neutral-900/70 dark:text-neutral-400 dark:hover:text-neutral-100 dark:hover:border-white/[0.14]'
 
-  // 输入防抖翻译：600ms 延迟后发送翻译请求
-  useEffect(() => {
+  const runTranslationNow = useCallback(async (text: string) => {
     const seq = ++translateSeq.current
-    const trimmed = input.trim()
+    const trimmed = text.trim()
     if (!trimmed) {
       setResult('')
       setLoading(false)
       return
     }
 
+    setLoading(true)
+    try {
+      const translated = await api.translateText(text)
+      if (seq !== translateSeq.current) return
+      setResult(translated)
+    } catch (e) {
+      if (seq !== translateSeq.current) return
+      console.error(e)
+      setResult(typeof e === 'string' ? e : (e as Error).message || 'Error')
+    } finally {
+      if (seq === translateSeq.current) setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    let active = true
+    api.getSettings()
+      .then((settings) => {
+        if (!active) return
+        setTranslationMethod(settings.screenshotTranslation?.translationMethod || 'ai')
+      })
+      .catch(err => console.error('[Translator] Failed to load translation method:', err))
+    return () => { active = false }
+  }, [])
+
+  const handleTranslationMethodChange = useCallback(async (value: string) => {
+    const method = value as TranslationMethod
+    if (method === translationMethod || methodSwitching) return
+    setMethodSwitching(true)
+    const previous = translationMethod
+    setTranslationMethod(method)
+    translateSeq.current += 1
+    setResult('')
+    setLoading(!!input.trim())
+    try {
+      const settings = await api.getSettings()
+      await api.saveSettings({
+        ...settings,
+        screenshotTranslation: {
+          ...settings.screenshotTranslation,
+          translationMethod: method,
+        },
+      })
+      if (input.trim()) {
+        await runTranslationNow(input)
+      } else {
+        setLoading(false)
+      }
+    } catch (err) {
+      setTranslationMethod(previous)
+      setLoading(false)
+      console.error('[Translator] Failed to switch translation method:', err)
+      setResult(err instanceof Error ? err.message : String(err))
+    } finally {
+      setMethodSwitching(false)
+    }
+  }, [input, methodSwitching, runTranslationNow, translationMethod])
+
+  // 输入防抖翻译：600ms 延迟后发送翻译请求
+  useEffect(() => {
+    const trimmed = input.trim()
+    if (!trimmed) {
+      translateSeq.current += 1
+      setResult('')
+      setLoading(false)
+      return
+    }
+    if (skipNextDebouncedInputRef.current === input) {
+      skipNextDebouncedInputRef.current = null
+      return
+    }
+
+    const seq = ++translateSeq.current
     const timer = setTimeout(async () => {
       if (seq !== translateSeq.current) return
       setLoading(true)
@@ -60,6 +149,32 @@ function Translator({
     }, 600)
     return () => clearTimeout(timer)
   }, [input])
+
+  const applyPendingTranslatorSelection = useCallback(async () => {
+    try {
+      const text = await api.takeTranslatorSelection()
+      if (!text.trim()) return
+      skipNextDebouncedInputRef.current = text
+      setInput(text)
+      setResult('')
+      inputRef.current?.focus({ preventScroll: true })
+      void runTranslationNow(text)
+    } catch (err) {
+      console.error('[Translator] Failed to take selected text:', err)
+    }
+  }, [runTranslationNow])
+
+  useEffect(() => {
+    void applyPendingTranslatorSelection()
+    const onFocus = () => { void applyPendingTranslatorSelection() }
+    const onHashChange = () => { void applyPendingTranslatorSelection() }
+    window.addEventListener('focus', onFocus)
+    window.addEventListener('hashchange', onHashChange)
+    return () => {
+      window.removeEventListener('focus', onFocus)
+      window.removeEventListener('hashchange', onHashChange)
+    }
+  }, [applyPendingTranslatorSelection])
 
   // Esc 键隐藏窗口
   useEffect(() => {
@@ -145,12 +260,24 @@ function Translator({
                 <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-neutral-400 dark:text-neutral-500">
                   {t.shotTranslated}
                 </span>
-                {loading && (
+                {(loading || methodSwitching) && (
                   <span className="flex items-center gap-1 text-[10.5px] text-neutral-400 dark:text-neutral-500">
                     <Loader2 size={10} className="animate-spin" />
                     {t.translatorTranslating}
                   </span>
                 )}
+                <select
+                  value={translationMethod}
+                  disabled={methodSwitching}
+                  onChange={(e) => void handleTranslationMethodChange(e.target.value)}
+                  title={t.screenshotTranslationMethod}
+                  aria-label={t.screenshotTranslationMethod}
+                  className={methodSelectClass}
+                >
+                  {translationMethodOptions.map(option => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
               </div>
               <div
                 ref={resultRef}

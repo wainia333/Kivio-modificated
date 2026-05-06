@@ -226,6 +226,7 @@ export const api = {
   // 文本翻译
   translateText: (text: string) => invoke<string>('translate_text', { text }),
   commitTranslation: (text: string) => invoke<void>('commit_translation', { text }),
+  takeTranslatorSelection: () => invoke<string>('take_translator_selection'),
 
   // 外部链接
   openExternal: (url: string) => invoke<void>('open_external', { url }),
