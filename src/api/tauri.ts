@@ -316,6 +316,14 @@ export const api = {
     hitRegion?: { x: number; y: number; width: number; height: number } | null
   }) =>
     invoke<void>('lens_set_floating', { rect }),
+  lensFlyFloating: (rect: {
+    from: { x: number; y: number }
+    to: { x: number; y: number }
+    width: number
+    height: number
+    durationMs?: number
+  }) =>
+    invoke<void>('lens_fly_floating', { rect }),
   lensSetHitRegion: (rect: { x: number; y: number; width: number; height: number } | null) =>
     invoke<boolean>('lens_set_hit_region', { rect }),
   lensSetIgnoreCursorEvents: (ignore: boolean) =>

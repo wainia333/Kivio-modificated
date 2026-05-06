@@ -2169,6 +2169,23 @@ struct FloatingRect {
 
 #[derive(serde::Deserialize, Clone, Copy)]
 #[serde(rename_all = "camelCase")]
+struct FloatingPoint {
+    x: f64,
+    y: f64,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FloatingFlyRect {
+    from: FloatingPoint,
+    to: FloatingPoint,
+    width: f64,
+    height: f64,
+    duration_ms: Option<u64>,
+}
+
+#[derive(serde::Deserialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
 struct HitRegionRect {
     x: f64,
     y: f64,
@@ -2214,10 +2231,119 @@ fn apply_floating_rect(window: &WebviewWindow, rect: &FloatingRect) -> Result<()
     Ok(())
 }
 
+fn validate_floating_fly_rect(rect: &FloatingFlyRect) -> Result<(), String> {
+    if !rect.from.x.is_finite()
+        || !rect.from.y.is_finite()
+        || !rect.to.x.is_finite()
+        || !rect.to.y.is_finite()
+        || !rect.width.is_finite()
+        || !rect.height.is_finite()
+        || rect.width <= 0.0
+        || rect.height <= 0.0
+    {
+        return Err("Invalid floating fly rect".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn ease_out_cubic(t: f64) -> f64 {
+    let inv = 1.0 - t;
+    1.0 - inv * inv * inv
+}
+
+fn apply_floating_fly_rect(window: &WebviewWindow, rect: &FloatingFlyRect) -> Result<(), String> {
+    validate_floating_fly_rect(rect)?;
+
+    #[cfg(target_os = "windows")]
+    {
+        use ::windows::Win32::Graphics::Dwm::DwmFlush;
+        use ::windows::Win32::UI::WindowsAndMessaging::{
+            SetWindowPos, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER,
+        };
+
+        if let Ok(hwnd) = window.hwnd() {
+            let scale = window.scale_factor().unwrap_or(1.0);
+            let scale = if scale.is_finite() && scale > 0.0 {
+                scale
+            } else {
+                1.0
+            };
+            let width = (rect.width * scale).round() as i32;
+            let height = (rect.height * scale).round() as i32;
+            let from_x = (rect.from.x * scale).round() as i32;
+            let from_y = (rect.from.y * scale).round() as i32;
+            let to_x = (rect.to.x * scale).round() as i32;
+            let to_y = (rect.to.y * scale).round() as i32;
+            let flags = SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOZORDER;
+
+            unsafe {
+                SetWindowPos(hwnd, None, from_x, from_y, width, height, flags)
+                    .map_err(|e| format!("SetWindowPos(start) failed: {e}"))?;
+            }
+
+            if from_x == to_x && from_y == to_y {
+                return Ok(());
+            }
+
+            let duration_ms = rect.duration_ms.unwrap_or(260).clamp(80, 600);
+            let duration = Duration::from_millis(duration_ms);
+            let started = Instant::now();
+            let mut last_x = from_x;
+            let mut last_y = from_y;
+
+            loop {
+                let linear =
+                    (started.elapsed().as_secs_f64() / duration.as_secs_f64()).clamp(0.0, 1.0);
+                let eased = ease_out_cubic(linear);
+                let next_x = (from_x as f64 + (to_x - from_x) as f64 * eased).round() as i32;
+                let next_y = (from_y as f64 + (to_y - from_y) as f64 * eased).round() as i32;
+
+                if next_x != last_x || next_y != last_y || linear >= 1.0 {
+                    unsafe {
+                        SetWindowPos(hwnd, None, next_x, next_y, 0, 0, flags | SWP_NOSIZE)
+                            .map_err(|e| format!("SetWindowPos(frame) failed: {e}"))?;
+                    }
+                    last_x = next_x;
+                    last_y = next_y;
+                }
+
+                if linear >= 1.0 {
+                    break;
+                }
+
+                let flushed = unsafe { DwmFlush().is_ok() };
+                if !flushed {
+                    std::thread::sleep(Duration::from_millis(8));
+                }
+            }
+
+            return Ok(());
+        }
+    }
+
+    let final_rect = FloatingRect {
+        x: Some(rect.to.x),
+        y: Some(rect.to.y),
+        width: rect.width,
+        height: rect.height,
+        hit_region: None,
+    };
+    apply_floating_rect(window, &final_rect)
+}
+
 #[tauri::command]
 fn lens_set_floating(app: AppHandle, rect: FloatingRect) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("lens") {
         apply_floating_rect(&window, &rect)?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn lens_fly_floating(app: AppHandle, rect: FloatingFlyRect) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("lens") {
+        apply_floating_fly_rect(&window, &rect)?;
     }
     Ok(())
 }
@@ -3512,6 +3638,7 @@ fn main() {
             lens_cancel_stream,
             lens_close,
             lens_set_floating,
+            lens_fly_floating,
             lens_set_hit_region,
             lens_set_ignore_cursor_events,
             take_lens_selection,

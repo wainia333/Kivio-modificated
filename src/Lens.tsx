@@ -362,10 +362,6 @@ function lerpNumber(from: number, to: number, t: number): number {
   return from + (to - from) * t
 }
 
-function easeOutCubic(t: number): number {
-  return 1 - Math.pow(1 - t, 3)
-}
-
 function lerpRect(from: Rect, to: Rect, t: number): Rect {
   return {
     x: lerpNumber(from.x, to.x, t),
@@ -1024,50 +1020,6 @@ export default function Lens() {
     }, duration + 80)
   }, [])
 
-  const animateNativeFloatingWindow = useCallback(async ({
-    from,
-    to,
-    width,
-    height,
-    seq,
-  }: {
-    from: Point
-    to: Point
-    width: number
-    height: number
-    seq: number
-  }) => {
-    if (from.x === to.x && from.y === to.y) return
-
-    const duration = NATIVE_FLOATING_FLY_MS
-    const startedAt = performance.now()
-    const nextFrame = () => new Promise<number>(resolve => requestAnimationFrame(resolve))
-    let last = from
-
-    while (seq === nativeFlySeqRef.current) {
-      const now = performance.now()
-      const linear = Math.min(1, Math.max(0, (now - startedAt) / duration))
-      const eased = easeOutCubic(linear)
-      const next = {
-        x: Math.round(lerpNumber(from.x, to.x, eased)),
-        y: Math.round(lerpNumber(from.y, to.y, eased)),
-      }
-
-      if (next.x !== last.x || next.y !== last.y || linear >= 1) {
-        await api.lensSetFloating({
-          x: next.x,
-          y: next.y,
-          width,
-          height,
-        })
-        last = next
-      }
-
-      if (linear >= 1) break
-      await nextFrame()
-    }
-  }, [])
-
   // select 态进入：刷新所有 state、重算对话栏位置、播放 intro 动画
   const enterSelect = useCallback(async () => {
     setLensCursorPassthrough(false)
@@ -1722,12 +1674,12 @@ export default function Lens() {
           floatingSizeRef.current = { width, height }
         })
 
-        await animateNativeFloatingWindow({
+        await api.lensFlyFloating({
           from: fromOrigin,
           to: targetOrigin,
           width,
           height,
-          seq: flySeq,
+          durationMs: NATIVE_FLOATING_FLY_MS,
         })
         if (flySeq !== nativeFlySeqRef.current) return
 
