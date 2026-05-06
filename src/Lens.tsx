@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type AnimationEvent, type ClipboardEvent } from 'react'
 import { flushSync } from 'react-dom'
 import { Loader2, Copy, Check, Square, Image as ImageIcon, ArrowUp, History as HistoryIcon, ChevronDown, Brain, MousePointer2, Play, X } from 'lucide-react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -869,6 +869,7 @@ export default function Lens() {
   // 截图后输入栏会从 select 位置飞到截图附近。Windows 原生命中裁剪不能在动画中裁得太紧，
   // 否则 WebView 会把正在飞行的卡片裁掉。
   const [barInFlight, setBarInFlight] = useState(false)
+  const [jellyActive, setJellyActive] = useState(false)
   // capturedFrame：保留最后一次截图选区/窗口的高亮框，作为"已截图"视觉标记，ready/answering 态继续显示
   const [capturedFrame, setCapturedFrame] = useState<CapturedFrame | null>(null)
   // 箭头标注:仅 stage==='ready' 子模式
@@ -1020,6 +1021,10 @@ export default function Lens() {
     }, duration + 80)
   }, [])
 
+  const handleJellyAnimationEnd = useCallback((e: AnimationEvent<HTMLElement>) => {
+    if (e.animationName === 'lens-jelly-pop') setJellyActive(false)
+  }, [])
+
   // select 态进入：刷新所有 state、重算对话栏位置、播放 intro 动画
   const enterSelect = useCallback(async () => {
     setLensCursorPassthrough(false)
@@ -1066,6 +1071,7 @@ export default function Lens() {
       setBarFlyOffset({ x: 0, y: 0 })
       setBarRebaseHidden(false)
       setBarInFlight(false)
+      setJellyActive(false)
       setStage('select')
       setMode(readModeFromHash())
       setFloatingRebased(false)
@@ -1339,6 +1345,7 @@ export default function Lens() {
       setBarFlyOffset({ x: 0, y: 0 })
       setBarRebaseHidden(false)
       setBarInFlight(false)
+      setJellyActive(false)
       setStage('select')
       setFloatingRebased(false)
       setHovered(null)
@@ -1651,6 +1658,7 @@ export default function Lens() {
         setBarNoTransition(true)
         setBarRebaseHidden(true)
         setBarInFlight(false)
+        setJellyActive(false)
         setSelectBarCollapsed(false)
         setBarFlyOffset({ x: 0, y: 0 })
         setBarRect({ x: 0, y: 0, width })
@@ -1689,7 +1697,11 @@ export default function Lens() {
           setBarRect({ x: 0, y: 0, width })
           setBarRebaseHidden(false)
           setBarNoTransition(false)
+          setJellyActive(false)
           floatingSizeRef.current = { width, height }
+        })
+        requestAnimationFrame(() => {
+          if (flySeq === nativeFlySeqRef.current) setJellyActive(true)
         })
       } catch (err) {
         console.error('[lens-floating] native floating failed:', err)
@@ -1697,6 +1709,7 @@ export default function Lens() {
           setFloatingRebased(false)
           setBarRebaseHidden(false)
           setBarNoTransition(false)
+          setJellyActive(false)
           setBarRect({
             x: Math.round(targetX),
             y: Math.round(targetY),
@@ -2224,6 +2237,7 @@ export default function Lens() {
       setBarFlyOffset({ x: 0, y: 0 })
       setBarRebaseHidden(false)
       setBarInFlight(false)
+      setJellyActive(false)
       setSelectBarCollapsed(false)
       setStage('answering')
     })
@@ -2873,11 +2887,12 @@ export default function Lens() {
       {showBar && (
         <div
           ref={barPanelRef}
-          className="absolute ease-out"
+          className={`absolute ease-out ${jellyActive && isFloatingLayout ? 'lens-jelly-pop' : ''}`}
           onMouseDown={(e) => e.stopPropagation()}
           onMouseMove={(e) => e.stopPropagation()}
           onMouseUp={(e) => e.stopPropagation()}
           onClick={(e) => e.stopPropagation()}
+          onAnimationEnd={handleJellyAnimationEnd}
           style={{
             left: barRect.x,
             top: barRect.y,
@@ -2885,7 +2900,7 @@ export default function Lens() {
             transitionProperty: barNoTransition ? 'none' : 'transform, opacity',
             transitionDuration: barNoTransition ? '0ms' : `${hideSelectBar ? SELECT_BAR_COLLAPSE_MS : TRANSITION_MS}ms`,
             transitionTimingFunction: 'cubic-bezier(0.22, 1, 0.36, 1)',
-            transform: `translate3d(${barFlyOffset.x}px, ${barFlyOffset.y}px, 0) scale(${barIntro && !hideSelectBar ? 1 : 0.92})`,
+            transform: `translate3d(${barFlyOffset.x}px, ${barFlyOffset.y}px, 0) scale(${barIntro && !hideSelectBar ? 1 : 0.92}) scale(var(--lens-jelly-x, 1), var(--lens-jelly-y, 1))`,
             willChange: 'transform, opacity',
             opacity: barIntro && !hideSelectBar ? 1 : 0,
             visibility: barRebaseHidden ? 'hidden' : undefined,
@@ -3163,11 +3178,12 @@ export default function Lens() {
       {showTranslateCard && (
         <div
           ref={translateCardRef}
-          className="absolute ease-out rounded-2xl bg-white dark:bg-neutral-900 shadow-[0_10px_28px_-20px_rgba(0,0,0,0.28)] ring-1 ring-black/[0.04] dark:ring-white/[0.06] overflow-hidden select-text"
+          className={`absolute ease-out rounded-2xl bg-white dark:bg-neutral-900 shadow-[0_10px_28px_-20px_rgba(0,0,0,0.28)] ring-1 ring-black/[0.04] dark:ring-white/[0.06] overflow-hidden select-text ${jellyActive && isFloatingLayout ? 'lens-jelly-pop' : ''}`}
           onMouseDown={(e) => e.stopPropagation()}
           onMouseMove={(e) => e.stopPropagation()}
           onMouseUp={(e) => e.stopPropagation()}
           onClick={(e) => e.stopPropagation()}
+          onAnimationEnd={handleJellyAnimationEnd}
           style={{
             left: barRect.x,
             top: barRect.y,
@@ -3178,7 +3194,7 @@ export default function Lens() {
             transitionProperty: barNoTransition ? 'none' : 'transform, opacity',
             transitionDuration: barNoTransition ? '0ms' : `${TRANSITION_MS}ms`,
             transitionTimingFunction: 'cubic-bezier(0.22, 1, 0.36, 1)',
-            transform: `translate3d(${barFlyOffset.x}px, ${barFlyOffset.y}px, 0) scale(${barIntro ? 1 : 0.92})`,
+            transform: `translate3d(${barFlyOffset.x}px, ${barFlyOffset.y}px, 0) scale(${barIntro ? 1 : 0.92}) scale(var(--lens-jelly-x, 1), var(--lens-jelly-y, 1))`,
             willChange: 'transform, opacity',
             opacity: barIntro ? 1 : 0,
             visibility: barRebaseHidden ? 'hidden' : undefined,
