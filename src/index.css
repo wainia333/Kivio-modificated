@@ -296,9 +296,9 @@ body {
 }
 
 .ocr-editable {
-  min-height: 72px;
-  max-height: 192px;
-  overflow-y: auto;
+  min-height: 1.48em;
+  max-height: none;
+  overflow-y: visible;
   cursor: text;
   border-radius: 8px;
   padding: 0;
