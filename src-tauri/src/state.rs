@@ -27,9 +27,6 @@ pub struct AppState {
     /// Lens 启动前抓到的选中文本：放在这里等前端 enterSelect 来取走。
     /// 取一次清一次（take 语义）。无选中 / 取过 / translate 模式 = None。
     pub pending_selection: Mutex<Option<String>>,
-    /// Windows 截图层背景快照：进入截图界面前抓取，前端 take 后作为静态背景显示。
-    /// 这样截图过程中不再让透明 WebView 实时覆盖浏览器视频层。
-    pub pending_lens_snapshot: Mutex<Option<String>>,
     /// API Key 多 key failover 状态：(provider_id, key_idx) → 冷却到期时间。
     /// 某个 key 触发 quota/rate-limit/auth 失败时进入冷却，KEY_COOLDOWN 秒内不再选用。
     pub key_cooldowns: Mutex<HashMap<(String, usize), Instant>>,
@@ -156,7 +153,6 @@ mod tests {
             lens_busy: AtomicBool::new(false),
             explain_stream_generation: AtomicU64::new(0),
             pending_selection: Mutex::new(None),
-            pending_lens_snapshot: Mutex::new(None),
             key_cooldowns: Mutex::new(HashMap::new()),
             active_key_idx: Mutex::new(HashMap::new()),
             baidu_ocr_tokens: Mutex::new(HashMap::new()),

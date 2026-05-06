@@ -940,16 +940,6 @@ fn explain_read_image(
     }))
 }
 
-#[tauri::command]
-fn lens_take_screen_snapshot(state: State<AppState>) -> String {
-    state
-        .pending_lens_snapshot
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .take()
-        .unwrap_or_default()
-}
-
 // ====== Lens 模式命令 ======
 
 #[derive(serde::Serialize)]
@@ -1098,11 +1088,6 @@ fn lens_request_internal(app: &AppHandle, mode: &str) -> Result<(), String> {
     } else {
         None
     };
-    #[cfg(target_os = "windows")]
-    let pending_snapshot = capture_current_monitor_snapshot(app);
-    #[cfg(not(target_os = "windows"))]
-    let pending_snapshot: Option<String> = None;
-
     let window = match windows::ensure_lens_window(app) {
         Ok(w) => w,
         Err(e) => {
@@ -1116,9 +1101,6 @@ fn lens_request_internal(app: &AppHandle, mode: &str) -> Result<(), String> {
     // 结果暂存在 state.pending_selection，等前端 take 走。translate 模式写 None，避免遗留旧值。
     if let Ok(mut guard) = state.pending_selection.lock() {
         *guard = pending_selection;
-    }
-    if let Ok(mut guard) = state.pending_lens_snapshot.lock() {
-        *guard = pending_snapshot;
     }
     // 把 mode 编码进 hash query，前端通过 location.hash 读取（'#lens?mode=translate'）
     let safe_mode = if mode == "translate" {
@@ -2145,9 +2127,6 @@ fn lens_close(app: AppHandle) -> Result<(), String> {
         let _ = window.set_ignore_cursor_events(false);
         let _ = window.hide();
     }
-    if let Ok(mut snapshot) = state.pending_lens_snapshot.lock() {
-        *snapshot = None;
-    }
     if let Some(id) = current_id {
         cleanup_explain_image(&app, &id);
     }
@@ -2807,30 +2786,6 @@ fn register_hotkeys(app: &AppHandle) -> Result<(), String> {
 /// 获取当前鼠标位置
 fn get_mouse_position(app: &AppHandle) -> Option<tauri::PhysicalPosition<f64>> {
     app.cursor_position().ok()
-}
-
-#[cfg(target_os = "windows")]
-fn capture_current_monitor_snapshot(app: &AppHandle) -> Option<String> {
-    let cursor = get_mouse_position(app)?;
-    let monitor = Monitor::from_point(cursor.x.round() as i32, cursor.y.round() as i32)
-        .or_else(|_| {
-            Monitor::all()
-                .map_err(|e| e.to_string())?
-                .into_iter()
-                .next()
-                .ok_or_else(|| "No monitor found".to_string())
-        })
-        .ok()?;
-
-    let image = monitor.capture_image().ok()?;
-    let temp_path = std::env::temp_dir().join(format!("lens-screen-{}.png", Uuid::new_v4()));
-    if image.save(&temp_path).is_err() {
-        return None;
-    }
-    let bytes = fs::read(&temp_path).ok()?;
-    let _ = fs::remove_file(&temp_path);
-    let base64 = general_purpose::STANDARD.encode(bytes);
-    Some(format!("data:image/png;base64,{base64}"))
 }
 
 /// Windows 平台：截取指定区域的屏幕图像
@@ -3559,7 +3514,6 @@ fn main() {
                 lens_busy: AtomicBool::new(false),
                 explain_stream_generation: AtomicU64::new(0),
                 pending_selection: Mutex::new(None),
-                pending_lens_snapshot: Mutex::new(None),
                 key_cooldowns: Mutex::new(HashMap::new()),
                 active_key_idx: Mutex::new(HashMap::new()),
                 baidu_ocr_tokens: Mutex::new(HashMap::new()),
@@ -3626,7 +3580,6 @@ fn main() {
             lens_request,
             lens_request_translate,
             lens_cursor_position,
-            lens_take_screen_snapshot,
             lens_list_windows,
             lens_capture_window,
             lens_capture_region,

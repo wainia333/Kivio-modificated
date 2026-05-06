@@ -268,7 +268,6 @@ export const api = {
     on<LensTranslateStreamPayload>('lens-translate-stream', (payload) => listener(payload)),
   lensRequest: () => invoke<void>('lens_request'),
   lensCursorPosition: () => invoke<LensCursorPosition | null>('lens_cursor_position'),
-  lensTakeScreenSnapshot: () => invoke<string>('lens_take_screen_snapshot'),
   lensListWindows: () => invoke<LensWindowInfo[]>('lens_list_windows'),
   lensCaptureWindow: (windowId: number) =>
     invoke<{ success: boolean; imageId?: string; error?: string }>('lens_capture_window', { windowId }),

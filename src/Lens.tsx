@@ -815,7 +815,6 @@ export default function Lens() {
   const [dragging, setDragging] = useState(false)
   const [selectBarCollapsed, setSelectBarCollapsed] = useState(false)
   const [animatedHoverRect, setAnimatedHoverRect] = useState<Rect | null>(null)
-  const [screenSnapshot, setScreenSnapshot] = useState('')
   const [imagePreview, setImagePreview] = useState('')
   const [appLabel, setAppLabel] = useState('')
   const [input, setInput] = useState('')
@@ -1082,7 +1081,6 @@ export default function Lens() {
       setDragging(false)
       setSelectBarCollapsed(false)
       setAnimatedHoverRect(null)
-      setScreenSnapshot('')
       setImagePreview('')
       setAppLabel('')
       setInput('')
@@ -1128,9 +1126,6 @@ export default function Lens() {
         }
       })()
     }
-    void api.lensTakeScreenSnapshot()
-      .then(snapshot => setScreenSnapshot(snapshot || ''))
-      .catch(err => console.warn('[lens] take screen snapshot failed:', err))
     requestAnimationFrame(() => {
       // 第二个 raf 同时恢复 transitions 并触发 intro：现在 bar 已经在 select 位置，
       // 只对 transform/opacity 做缩放进入动画，不会回放历史 left/top 过渡。
@@ -1353,7 +1348,6 @@ export default function Lens() {
       setDragCurrent(null)
       setDragging(false)
       setSelectBarCollapsed(false)
-      setScreenSnapshot('')
       setImagePreview('')
       setAppLabel('')
       setInput('')
@@ -2226,7 +2220,6 @@ export default function Lens() {
     // 防御：恢复历史 setMessages 会触发持久化 effect，但本路径不是"流刚结束"，不该 push 重复条目
     justFinishedStreamRef.current = false
     flushSync(() => {
-      setScreenSnapshot('')
       setImagePreview(item.imagePreview)
       setAppLabel(item.appLabel)
       setInput('')
@@ -2293,7 +2286,6 @@ export default function Lens() {
   // 浮动布局生效条件：原生窗口已经真的缩成浮动模式。
   // 没截图就直接提问的场景下，window 还是全屏 overlay、bar 还在底部居中，此时仍按全屏布局走。
   const isFloatingLayout = floatingRebased && capturedFrame !== null && stage !== 'select'
-  const showScreenSnapshotBackdrop = !!screenSnapshot && stage === 'select'
   const stableAnswerHeight = isFloatingLayout
     ? fullscreenMetricsRef.current?.ANSWER_H || metrics.ANSWER_H
     : metrics.ANSWER_H
@@ -2703,17 +2695,8 @@ export default function Lens() {
       data-tauri-drag-region="false"
       style={{
         cursor: stage === 'select' ? 'crosshair' : undefined,
-        backgroundColor: showScreenSnapshotBackdrop ? '#000' : undefined,
       }}
     >
-      {showScreenSnapshotBackdrop && (
-        <img
-          src={screenSnapshot}
-          alt=""
-          draggable={false}
-          className="absolute inset-0 w-full h-full object-fill pointer-events-none"
-        />
-      )}
       {/* select 态遮罩：按 TrOCR/ShareX 的灰幕强度变暗；拖拽选区内保持清晰，hover 只画边框。 */}
       {stage === 'select' && (
         <div className="absolute inset-0 pointer-events-none">
