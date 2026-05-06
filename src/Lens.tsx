@@ -362,6 +362,10 @@ function lerpNumber(from: number, to: number, t: number): number {
   return from + (to - from) * t
 }
 
+function easeOutCubic(t: number): number {
+  return 1 - Math.pow(1 - t, 3)
+}
+
 function lerpRect(from: Rect, to: Rect, t: number): Rect {
   return {
     x: lerpNumber(from.x, to.x, t),
@@ -423,6 +427,7 @@ function domRectToRect(rect: DOMRect): Rect | null {
 }
 
 const TRANSITION_MS = 380
+const NATIVE_FLOATING_FLY_MS = 260
 const SELECT_BAR_COLLAPSE_MS = 120
 const FLOATING_PADDING = 0
 const FLOATING_GAP = 8
@@ -800,7 +805,9 @@ function ShareXInfoLabel({ rect, text, viewport }: { rect: Rect; text: string; v
  * - ready：截图后对话栏 CSS transition 飞到选区附近，加缩略图，输入聚焦
  * - answering：对话栏下方展开 answer 区（透明背景，对话栏不动）
  *
- * 关键：webview 始终全屏，整个过渡靠 CSS。后端 lens_resolve_anchor 仅算目标坐标，不缩窗口。
+ * 截图后有两种布局：
+ * - 全屏保留模式：webview 仍覆盖屏幕，只让对话栏在前端飞到选区附近。
+ * - 原生浮窗模式：先把 Lens 窗口缩成真实小窗口，再移动这个原生窗口到选区附近。
  */
 export default function Lens() {
   const [stage, setStage] = useState<Stage>('select')
@@ -861,7 +868,7 @@ export default function Lens() {
   // 从老位置"滑"回 select 默认位置的闪烁。
   const [barNoTransition, setBarNoTransition] = useState(false)
   const [barFlyOffset, setBarFlyOffset] = useState<Point>({ x: 0, y: 0 })
-  // 旧原生浮窗交接遗留的隐藏开关；截图完成后不再自动缩放/移动原生窗口。
+  // 原生小浮窗创建和飞入期间临时隐藏内容，避免先露出旧的全屏坐标。
   const [barRebaseHidden, setBarRebaseHidden] = useState(false)
   // 截图后输入栏会从 select 位置飞到截图附近。Windows 原生命中裁剪不能在动画中裁得太紧，
   // 否则 WebView 会把正在飞行的卡片裁掉。
@@ -900,8 +907,7 @@ export default function Lens() {
   const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const speechAudioRef = useRef<HTMLAudioElement | null>(null)
   const speechSeqRef = useRef(0)
-  const floatingRebaseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const floatingRebaseSeqRef = useRef(0)
+  const nativeFlySeqRef = useRef(0)
   const barFlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const focusReqIdRef = useRef(0)
   const prevStreamingRef = useRef(false)
@@ -1018,6 +1024,50 @@ export default function Lens() {
     }, duration + 80)
   }, [])
 
+  const animateNativeFloatingWindow = useCallback(async ({
+    from,
+    to,
+    width,
+    height,
+    seq,
+  }: {
+    from: Point
+    to: Point
+    width: number
+    height: number
+    seq: number
+  }) => {
+    if (from.x === to.x && from.y === to.y) return
+
+    const duration = NATIVE_FLOATING_FLY_MS
+    const startedAt = performance.now()
+    const nextFrame = () => new Promise<number>(resolve => requestAnimationFrame(resolve))
+    let last = from
+
+    while (seq === nativeFlySeqRef.current) {
+      const now = performance.now()
+      const linear = Math.min(1, Math.max(0, (now - startedAt) / duration))
+      const eased = easeOutCubic(linear)
+      const next = {
+        x: Math.round(lerpNumber(from.x, to.x, eased)),
+        y: Math.round(lerpNumber(from.y, to.y, eased)),
+      }
+
+      if (next.x !== last.x || next.y !== last.y || linear >= 1) {
+        await api.lensSetFloating({
+          x: next.x,
+          y: next.y,
+          width,
+          height,
+        })
+        last = next
+      }
+
+      if (linear >= 1) break
+      await nextFrame()
+    }
+  }, [])
+
   // select 态进入：刷新所有 state、重算对话栏位置、播放 intro 动画
   const enterSelect = useCallback(async () => {
     setLensCursorPassthrough(false)
@@ -1029,15 +1079,7 @@ export default function Lens() {
       clearTimeout(closeResetTimerRef.current)
       closeResetTimerRef.current = null
     }
-    if (floatingRebaseTimerRef.current) {
-      clearTimeout(floatingRebaseTimerRef.current)
-      floatingRebaseTimerRef.current = null
-    }
-    floatingRebaseSeqRef.current++
-    if (barFlightTimerRef.current) {
-      clearTimeout(barFlightTimerRef.current)
-      barFlightTimerRef.current = null
-    }
+    nativeFlySeqRef.current++
     if (barFlightTimerRef.current) {
       clearTimeout(barFlightTimerRef.current)
       barFlightTimerRef.current = null
@@ -1188,9 +1230,9 @@ export default function Lens() {
     }
   }, [focusLensInput])
 
-  // viewport resize（拔显示器 / 切分辨率 / DPI 变更，以及浮动模式下 raf 同步动画的逐帧缩放）
+  // viewport resize（拔显示器 / 切分辨率 / DPI 变更，以及原生浮窗尺寸变化）
   // 都触发 'resize' 事件 → 更新 viewport state，让相对尺寸 metrics 重算。
-  // 注意：浮动模式 rebase 已经在 flyBarToAnchor 里通过同步动画完成，不再在 resize handler 里抢占 barRect。
+  // 注意：原生浮窗创建和移动在 flyBarToAnchor 里完成，不在 resize handler 里抢占 barRect。
   useEffect(() => {
     const onResize = () => {
       setViewport({ w: window.innerWidth, h: window.innerHeight })
@@ -1329,11 +1371,7 @@ export default function Lens() {
       clearTimeout(closeResetTimerRef.current)
       closeResetTimerRef.current = null
     }
-    if (floatingRebaseTimerRef.current) {
-      clearTimeout(floatingRebaseTimerRef.current)
-      floatingRebaseTimerRef.current = null
-    }
-    floatingRebaseSeqRef.current++
+    nativeFlySeqRef.current++
     if (translateEditDebounceRef.current) {
       clearTimeout(translateEditDebounceRef.current)
       translateEditDebounceRef.current = null
@@ -1643,56 +1681,79 @@ export default function Lens() {
 
     if (!keepFullscreen) {
       fullscreenMetricsRef.current = metrics
-      if (floatingRebaseTimerRef.current) clearTimeout(floatingRebaseTimerRef.current)
+      const flySeq = ++nativeFlySeqRef.current
       const width = Math.round(READY_W)
       const height = Math.round(target.height)
+      const fromOrigin = {
+        x: Math.round(winOrigin.x + barRect.x),
+        y: Math.round(winOrigin.y + barRect.y),
+      }
       const targetOrigin = { x: Math.round(target.windowX), y: Math.round(target.windowY) }
 
       flushSync(() => {
         setAppLabel(label)
         setFloatingRebased(false)
+        setNativeHitRegionActive(false)
+        setHitRegionRect(null)
         floatingSizeRef.current = null
         setBarNoTransition(true)
         setBarRebaseHidden(true)
         setBarInFlight(false)
         setSelectBarCollapsed(false)
         setBarFlyOffset({ x: 0, y: 0 })
-        setBarRect({
-          x: Math.round(targetX),
-          y: Math.round(targetY),
-          width,
-        })
+        setBarRect({ x: 0, y: 0, width })
         setStage(targetStage)
       })
 
       try {
         await api.lensSetFloating({
-          x: targetOrigin.x,
-          y: targetOrigin.y,
+          x: fromOrigin.x,
+          y: fromOrigin.y,
           width,
           height,
-          hitRegion: { x: 0, y: 0, width, height },
         })
+        if (flySeq !== nativeFlySeqRef.current) return
         flushSync(() => {
           setFloatingRebased(true)
-          setNativeHitRegionActive(false)
-          setHitRegionRect(null)
-          setWinOrigin(targetOrigin)
+          setWinOrigin(fromOrigin)
           setViewport({ w: width, h: height })
           setBarRect({ x: 0, y: 0, width })
           setBarRebaseHidden(false)
           floatingSizeRef.current = { width, height }
         })
-        requestAnimationFrame(() => setBarNoTransition(false))
+
+        await animateNativeFloatingWindow({
+          from: fromOrigin,
+          to: targetOrigin,
+          width,
+          height,
+          seq: flySeq,
+        })
+        if (flySeq !== nativeFlySeqRef.current) return
+
+        flushSync(() => {
+          setWinOrigin(targetOrigin)
+          setViewport({ w: width, h: height })
+          setBarRect({ x: 0, y: 0, width })
+          setBarRebaseHidden(false)
+          setBarNoTransition(false)
+          floatingSizeRef.current = { width, height }
+        })
       } catch (err) {
         console.error('[lens-floating] native floating failed:', err)
         flushSync(() => {
           setFloatingRebased(false)
           setBarRebaseHidden(false)
+          setBarNoTransition(false)
+          setBarRect({
+            x: Math.round(targetX),
+            y: Math.round(targetY),
+            width,
+          })
         })
       }
 
-      if (mode === 'chat') {
+      if (mode === 'chat' && flySeq === nativeFlySeqRef.current) {
         focusLensInput([30, 120, 260])
       }
       return
@@ -2232,7 +2293,7 @@ export default function Lens() {
 
   useEffect(() => () => {
     if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current)
-    if (floatingRebaseTimerRef.current) clearTimeout(floatingRebaseTimerRef.current)
+    nativeFlySeqRef.current++
     if (barFlightTimerRef.current) clearTimeout(barFlightTimerRef.current)
     if (translateEditDebounceRef.current) clearTimeout(translateEditDebounceRef.current)
     translateEditSeqRef.current++
