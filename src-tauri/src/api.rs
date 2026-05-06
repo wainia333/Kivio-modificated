@@ -8,7 +8,7 @@
 //! - `send_with_retry` —— 网络抖动 / 5xx / 429 退避重试。
 //! - `send_with_failover` —— 在 api_keys 列表上轮换。
 //! - `call_openai_text` / `call_openai_ocr` / `call_vision_api` —— 文本、OCR、视觉三类调用。
-//! - `call_baidu_ocr` / `call_baidu_translate` —— 百度 OCR 与百度翻译开放接口调用。
+//! - `call_baidu_ocr` / `call_chaoxing_ocr` / `call_baidu_translate` —— OCR 与翻译接口调用。
 //! - `call_google_translate` / `call_bing_translate` / `call_bing2_translate`
 //!   / `call_yandex_translate` / `call_microsoft_translate` —— 无密钥在线翻译接口调用。
 //! - `call_tencent_translate` / `call_caiyun2_translate` —— 腾讯云与彩云小译密钥接口调用。
@@ -1034,6 +1034,107 @@ pub async fn call_baidu_ocr(
         if !grouped.is_empty() {
             return Ok(grouped.join("\n\n"));
         }
+    }
+
+    Ok(lines.join("\n"))
+}
+
+fn collect_chaoxing_text(value: &serde_json::Value, lines: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(text) = map.get("text").and_then(|v| v.as_str()) {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    lines.push(trimmed.to_string());
+                }
+            }
+            for child in map.values() {
+                collect_chaoxing_text(child, lines);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_chaoxing_text(item, lines);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn chaoxing_ocr_lines(value: &serde_json::Value) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(data) = value.get("data") {
+        collect_chaoxing_text(data, &mut lines);
+    }
+    lines
+}
+
+/// 调用学习通 OCR 接口。
+pub async fn call_chaoxing_ocr(
+    state: &State<'_, AppState>,
+    image_path: &Path,
+    retry_attempts: usize,
+) -> Result<String, String> {
+    const ENDPOINT: &str = "http://ai.chaoxing.com/api/v1/ocr/common/sync";
+    const SECRET_ID: &str = "Inner_40731a6efece4c2e992c0d670222e6da";
+    const SIGN_SALT: &str = "43e7a66431b14c8f856a8e889070c19b";
+    const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+
+    let bytes = fs::read(image_path).map_err(|e| e.to_string())?;
+    if bytes.len() > MAX_IMAGE_BYTES {
+        return Err("Chaoxing OCR Error: image size cannot exceed 5MB".to_string());
+    }
+
+    let image_base64 = general_purpose::STANDARD.encode(bytes);
+    let now_ms = Utc::now().timestamp_millis();
+    let nonce = (now_ms.unsigned_abs() % 100_000) as u32;
+    let body_value = serde_json::json!({
+        "images": [
+            {
+                "data": image_base64,
+                "dataId": "1",
+                "type": 2
+            }
+        ],
+        "nonce": nonce,
+        "secretId": SECRET_ID,
+        "timestamp": now_ms
+    });
+    let body =
+        serde_json::to_string(&body_value).map_err(|e| format!("Chaoxing OCR build body: {e}"))?;
+    let signature = format!(
+        "{:x}",
+        md5::compute(format!("{body}{SIGN_SALT}").as_bytes())
+    );
+
+    let response = send_with_retry("Chaoxing OCR", retry_attempts, || {
+        state
+            .http
+            .post(ENDPOINT)
+            .header(CONTENT_TYPE, "application/json;charset=utf-8")
+            .header("CX-Signature", signature.clone())
+            .body(body.clone())
+            .send()
+    })
+    .await?;
+    let raw = response
+        .text()
+        .await
+        .map_err(|e| format!("Chaoxing OCR read body: {e}"))?;
+    let value: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
+        format!(
+            "Chaoxing OCR parse JSON: {e} (body: {})",
+            raw.chars().take(500).collect::<String>()
+        )
+    })?;
+    let lines = chaoxing_ocr_lines(&value);
+    if lines.is_empty() {
+        let msg = value
+            .get("msg")
+            .or_else(|| value.get("message"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("empty OCR result");
+        return Err(format!("Chaoxing OCR Error: {msg}"));
     }
 
     Ok(lines.join("\n"))
@@ -2903,6 +3004,19 @@ mod tests {
             google_translate_response_text(raw).unwrap(),
             "你好世界".to_string()
         );
+    }
+
+    #[test]
+    fn chaoxing_ocr_lines_extract_nested_text() {
+        let response = serde_json::json!({
+            "data": [[
+                { "text": "第一行" },
+                { "text": " second line " },
+                { "text": "" }
+            ]]
+        });
+
+        assert_eq!(chaoxing_ocr_lines(&response), vec!["第一行", "second line"]);
     }
 
     #[test]

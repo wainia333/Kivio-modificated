@@ -89,8 +89,8 @@ export type Settings = {
     hotkey: string
     providerId: string
     model: string
-    /** OCR method used after screenshot capture: AI vision, Baidu OCR, or system OCR */
-    ocrMethod?: 'ai' | 'baidu' | 'system'
+    /** OCR method used after screenshot capture: AI vision, Baidu OCR, Chaoxing OCR, or system OCR */
+    ocrMethod?: 'ai' | 'baidu' | 'chaoxing' | 'system'
     /** Translation interface used after OCR */
     translationMethod?: 'ai' | 'baidu' | 'google' | 'tencent' | 'bing' | 'bing2' | 'yandex' | 'caiyun2' | 'microsoft'
     /** AI text translation provider/model. Empty falls back to providerId/model */
@@ -144,7 +144,7 @@ export type Settings = {
     keepFullscreenAfterCapture?: boolean
   }
   settingsLanguage?: 'zh' | 'en'
-  /** 启动时静默检查 GH Releases 是否有新版（默认 true） */
+  /** 启动时静默检查 GH Releases 是否有新版（默认 false） */
   autoCheckUpdate?: boolean
   /** 截图自动归档开关（默认 false） */
   imageArchiveEnabled?: boolean

@@ -241,7 +241,7 @@ pub struct ScreenshotTranslationConfig {
     pub provider_id: String,
     #[serde(default = "default_openai_model")]
     pub model: String,
-    /// OCR 方法：ai / baidu / system。system 为 Apple Vision 本地 OCR 的兼容选项。
+    /// OCR 方法：ai / baidu / chaoxing / system。system 为 Apple Vision 本地 OCR 的兼容选项。
     #[serde(default = "default_screenshot_ocr_method")]
     pub ocr_method: String,
     /// 翻译接口：ai / baidu / google / tencent / bing / bing2 / yandex / caiyun2 / microsoft。
@@ -288,7 +288,7 @@ impl Default for ScreenshotTranslationConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            hotkey: "CommandOrControl+Shift+A".to_string(),
+            hotkey: default_screenshot_translation_hotkey(),
             provider_id: "default-ocr".to_string(),
             model: "gpt-4o".to_string(),
             ocr_method: "ai".to_string(),
@@ -368,7 +368,7 @@ impl Default for LensConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            hotkey: "CommandOrControl+Shift+G".to_string(),
+            hotkey: default_lens_hotkey(),
             provider_id: String::new(),
             model: String::new(),
             default_language: String::new(),
@@ -422,9 +422,9 @@ pub struct Settings {
     /// 防止 v2.3.x ↔ v2.4 反复切换时重复抹掉钥匙串
     #[serde(default)]
     pub legacy_keyring_migrated: bool,
-    /// 启动时静默检查 GitHub Releases 是否有新版（默认 true）
+    /// 启动时静默检查 GitHub Releases 是否有新版（默认 false）
     /// 仅做"提示 + 跳转 GH 下载页"，不集成 auto-installer，避免签名密钥那套
-    #[serde(default = "default_true")]
+    #[serde(default = "default_false")]
     pub auto_check_update: bool,
     /// 截图自动归档开关（默认 false）
     #[serde(default = "default_false")]
@@ -449,7 +449,7 @@ impl Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            hotkey: "CommandOrControl+Alt+T".to_string(),
+            hotkey: default_hotkey(),
             theme: "system".to_string(),
             target_lang: "auto".to_string(),
             source: "openai".to_string(),
@@ -465,7 +465,7 @@ impl Default for Settings {
             retry_enabled: default_retry_enabled(),
             retry_attempts: default_retry_attempts(),
             legacy_keyring_migrated: false,
-            auto_check_update: true,
+            auto_check_update: false,
             image_archive_enabled: false,
             image_archive_path: String::new(),
             openai: None,
@@ -557,7 +557,7 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
     }
     if !matches!(
         settings.screenshot_translation.ocr_method.as_str(),
-        "ai" | "baidu" | "system"
+        "ai" | "baidu" | "chaoxing" | "system"
     ) {
         settings.screenshot_translation.ocr_method = "ai".to_string();
     }
@@ -819,6 +819,20 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
         normalize_hotkey(&settings.screenshot_translation.hotkey);
     settings.lens.hotkey = normalize_hotkey(&settings.lens.hotkey);
 
+    // 旧版默认快捷键迁移到新的默认键；用户自定义快捷键不受影响。
+    if settings.hotkey == "CommandOrControl+Alt+T" {
+        settings.hotkey = default_hotkey();
+    }
+    if settings.screenshot_translation.hotkey == "CommandOrControl+Shift+A" {
+        settings.screenshot_translation.hotkey = default_screenshot_translation_hotkey();
+    }
+    if settings.lens.hotkey == "CommandOrControl+Shift+G" {
+        settings.lens.hotkey = default_lens_hotkey();
+    }
+
+    // 更新检查入口已隐藏，运行时也强制保持关闭。
+    settings.auto_check_update = false;
+
     // 规范化提示词（去除首尾空白，空值转为 None）
     settings.translator_prompt = normalize_optional_prompt(settings.translator_prompt.take());
     settings.screenshot_translation.prompt =
@@ -826,13 +840,13 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
 
     // 5. 确保必要字段不为空
     if settings.hotkey.is_empty() {
-        settings.hotkey = "CommandOrControl+Alt+T".to_string();
+        settings.hotkey = default_hotkey();
     }
     if settings.screenshot_translation.hotkey.is_empty() {
-        settings.screenshot_translation.hotkey = "CommandOrControl+Shift+A".to_string();
+        settings.screenshot_translation.hotkey = default_screenshot_translation_hotkey();
     }
     if settings.lens.hotkey.is_empty() {
-        settings.lens.hotkey = "CommandOrControl+Shift+G".to_string();
+        settings.lens.hotkey = default_lens_hotkey();
     }
     if settings.lens.message_order != "asc" && settings.lens.message_order != "desc" {
         settings.lens.message_order = "asc".to_string();
@@ -1011,11 +1025,11 @@ fn default_false() -> bool {
 }
 
 fn default_hotkey() -> String {
-    "CommandOrControl+Alt+T".to_string()
+    "F2".to_string()
 }
 
 fn default_screenshot_translation_hotkey() -> String {
-    "CommandOrControl+Shift+A".to_string()
+    "F4".to_string()
 }
 
 fn default_screenshot_ocr_method() -> String {
@@ -1035,7 +1049,7 @@ fn default_baidu_translate_source() -> String {
 }
 
 fn default_lens_hotkey() -> String {
-    "CommandOrControl+Shift+G".to_string()
+    "F3".to_string()
 }
 
 fn default_theme() -> String {
@@ -1175,13 +1189,25 @@ mod tests {
     #[test]
     fn sanitize_settings_normalizes_hotkeys() {
         let mut s = Settings::default();
-        s.hotkey = "cmd+alt+T".to_string();
-        s.screenshot_translation.hotkey = "ctrl+shift+A".to_string();
-        s.lens.hotkey = "cmd+shift+G".to_string();
+        s.hotkey = "cmd+alt+Y".to_string();
+        s.screenshot_translation.hotkey = "ctrl+shift+B".to_string();
+        s.lens.hotkey = "cmd+shift+H".to_string();
         let s = sanitize_settings(s);
-        assert_eq!(s.hotkey, "CommandOrControl+Alt+T");
-        assert_eq!(s.screenshot_translation.hotkey, "Control+Shift+A");
-        assert_eq!(s.lens.hotkey, "CommandOrControl+Shift+G");
+        assert_eq!(s.hotkey, "CommandOrControl+Alt+Y");
+        assert_eq!(s.screenshot_translation.hotkey, "Control+Shift+B");
+        assert_eq!(s.lens.hotkey, "CommandOrControl+Shift+H");
+    }
+
+    #[test]
+    fn sanitize_settings_migrates_old_default_hotkeys() {
+        let mut s = Settings::default();
+        s.hotkey = "CommandOrControl+Alt+T".to_string();
+        s.screenshot_translation.hotkey = "CommandOrControl+Shift+A".to_string();
+        s.lens.hotkey = "CommandOrControl+Shift+G".to_string();
+        let s = sanitize_settings(s);
+        assert_eq!(s.hotkey, "F2");
+        assert_eq!(s.screenshot_translation.hotkey, "F4");
+        assert_eq!(s.lens.hotkey, "F3");
     }
 
     #[test]

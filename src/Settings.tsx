@@ -3,11 +3,10 @@ import {
   X, Save, Plus, Trash2, RefreshCw,
   Settings as SettingsIcon, Languages, Camera,
   Cloud, Info, Palette, Keyboard, SlidersHorizontal, Globe,
-  Cpu, FileText, ShieldCheck, Aperture, ExternalLink, Download, ChevronRight
+  Cpu, FileText, ShieldCheck, Aperture, ExternalLink, ChevronRight
 } from 'lucide-react'
 import { open } from '@tauri-apps/plugin-dialog'
-import ReactMarkdown from 'react-markdown'
-import { api, type Settings as SettingsType, type ModelProvider, type DefaultPromptTemplates, type PermissionStatus, type UpdateInfo } from './api/tauri'
+import { api, type Settings as SettingsType, type ModelProvider, type DefaultPromptTemplates, type PermissionStatus } from './api/tauri'
 import { i18n } from './settings/i18n'
 import { buildHotkey } from './settings/utils'
 import { PROVIDER_PRESETS, type ProviderPreset } from './settings/providerPresets'
@@ -46,15 +45,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
   const [permissionsLoading, setPermissionsLoading] = useState(false)
   const [testingProviderId, setTestingProviderId] = useState<string | null>(null)
   const [providerTestFeedback, setProviderTestFeedback] = useState<Record<string, { ok: boolean; message: string }>>({})
-  // 更新检查状态：'idle' / 'checking' / 'up-to-date' / 'available'
-  const [updateStatus, setUpdateStatus] = useState<'idle' | 'checking' | 'up-to-date' | 'available'>('idle')
-  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null)
-  // 下载/安装两段式状态机:idle → downloading(进度条) → downloaded(显示安装按钮) → 用户点击 → 应用退出
-  // failed 时显示错误 + 重试 + 跳 GitHub 兜底
-  const [downloadState, setDownloadState] = useState<'idle' | 'downloading' | 'downloaded' | 'failed'>('idle')
-  const [downloadPercent, setDownloadPercent] = useState(0)
-  const [downloadedPath, setDownloadedPath] = useState('')
-  const [downloadError, setDownloadError] = useState('')
   // Apple Intelligence sidecar 可用性：mount 时查一次,unavailable 就把 onDevice 预设 chip 隐藏
   const [appleIntelligenceAvailable, setAppleIntelligenceAvailable] = useState(false)
   // 加载失败时的错误信息；非空则渲染错误 UI 而不是用合成默认值进入正常视图
@@ -149,103 +139,13 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
     return () => { cancelled = true }
   }, [])
 
-  // 监听后端启动时的 update-available 事件，发现新版立即在 About 区块展开提示
-  useEffect(() => {
-    let cancelled = false
-    let unlisten: (() => void) | undefined
-    api.onUpdateAvailable((info) => {
-      if (cancelled) return
-      setUpdateInfo(info)
-      setUpdateStatus('available')
-    }).then((u) => {
-      if (cancelled) u()
-      else unlisten = u
-    })
-    return () => {
-      cancelled = true
-      unlisten?.()
+  const handleOpenOriginalProject = useCallback(async () => {
+    try {
+      await api.openExternal('https://github.com/ZMGID/kivio')
+    } catch (err) {
+      console.error('Open original project failed:', err)
     }
   }, [])
-
-  // Settings 打开时静默 check 一次（覆盖启动事件用户当时没开 Settings 的场景）
-  useEffect(() => {
-    if (!settings) return
-    if (settings.autoCheckUpdate === false) return
-    if (updateStatus === 'available' || updateStatus === 'checking') return
-    let cancelled = false
-    api.checkUpdate().then((info) => {
-      if (cancelled) return
-      if (info.available) {
-        setUpdateInfo(info)
-        setUpdateStatus('available')
-      }
-    }).catch(() => {})
-    return () => { cancelled = true }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [settings?.autoCheckUpdate, !!settings])
-
-  /** 用户点 "检查更新" 按钮 */
-  const handleCheckUpdate = useCallback(async () => {
-    setUpdateStatus('checking')
-    try {
-      const info = await api.checkUpdate()
-      if (info.available) {
-        setUpdateInfo(info)
-        setUpdateStatus('available')
-      } else {
-        setUpdateStatus('up-to-date')
-        // 5s 后自动复位回 idle，避免"已是最新"标签长期占位
-        setTimeout(() => setUpdateStatus((s) => (s === 'up-to-date' ? 'idle' : s)), 5000)
-      }
-    } catch (err) {
-      console.error('Check update failed:', err)
-      setUpdateStatus('idle')
-    }
-  }, [])
-
-  const handleOpenReleasePage = useCallback(async () => {
-    if (!updateInfo?.htmlUrl) return
-    try {
-      await api.openExternal(updateInfo.htmlUrl)
-    } catch (err) {
-      console.error('Open release page failed:', err)
-    }
-  }, [updateInfo])
-
-  /** 下载新版安装包到 temp dir,期间监听 update-download-progress 事件刷新进度条 */
-  const handleDownloadAndInstall = useCallback(async () => {
-    if (!updateInfo?.version) return
-    setDownloadState('downloading')
-    setDownloadPercent(0)
-    setDownloadError('')
-    let unlisten: (() => void) | undefined
-    try {
-      unlisten = await api.onUpdateDownloadProgress((p) => {
-        setDownloadPercent(Math.max(0, Math.min(100, Math.round(p.percent))))
-      })
-      const path = await api.downloadUpdate(updateInfo.version)
-      setDownloadedPath(path)
-      setDownloadState('downloaded')
-    } catch (err) {
-      console.error('Download update failed:', err)
-      setDownloadError(typeof err === 'string' ? err : (err instanceof Error ? err.message : String(err)))
-      setDownloadState('failed')
-    } finally {
-      unlisten?.()
-    }
-  }, [updateInfo])
-
-  /** 启动 installer 并退出当前应用。Rust 端会在 macOS 上 cp 新 .app + open,在 Windows spawn NSIS exe */
-  const handleInstall = useCallback(async () => {
-    if (!downloadedPath) return
-    try {
-      await api.installUpdate(downloadedPath)
-    } catch (err) {
-      console.error('Install update failed:', err)
-      setDownloadError(typeof err === 'string' ? err : (err instanceof Error ? err.message : String(err)))
-      setDownloadState('failed')
-    }
-  }, [downloadedPath])
 
   useEffect(() => {
     setProviderTestFeedback({})
@@ -640,7 +540,7 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
       if (!prev) return prev
       const current = prev.screenshotTranslation || {
         enabled: true,
-        hotkey: 'CommandOrControl+Shift+A',
+        hotkey: 'F4',
         providerId: 'default-ocr',
         model: 'gpt-4o',
         ocrMethod: 'ai',
@@ -691,7 +591,7 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
       if (!prev) return prev
       const current = prev.lens || {
         enabled: true,
-        hotkey: 'CommandOrControl+Shift+G',
+        hotkey: 'F3',
         providerId: '',
         model: '',
         defaultLanguage: '',
@@ -1219,10 +1119,10 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
 
                 {settings.screenshotTranslation?.enabled !== false && (
                   <div className="px-4 py-3 space-y-1.5">
-                    <span className="text-[12px] font-medium text-neutral-700 dark:text-neutral-200">{t.hotkey}</span>
+                    <span className="text-[12px] font-medium text-neutral-700 dark:text-neutral-200">{t.ocrHotkey}</span>
                     <HotkeyInput
-                      value={settings.screenshotTranslation?.hotkey || 'CommandOrControl+Shift+A'}
-                      placeholder="CommandOrControl+Shift+A"
+                      value={settings.screenshotTranslation?.hotkey || 'F4'}
+                      placeholder="F4"
                       recording={recordingTarget === 'screenshotTranslation'}
                       onToggleRecording={() => toggleRecording('screenshotTranslation')}
                       recordLabel={t.hotkeyRecord}
@@ -1244,12 +1144,13 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
                         className="w-56"
                         value={screenshotOcrMethod}
                         onChange={(v) => updateScreenshotTranslation({
-                          ocrMethod: v as 'ai' | 'baidu' | 'system',
+                          ocrMethod: v as 'ai' | 'baidu' | 'chaoxing' | 'system',
                           useSystemOcr: v === 'system',
                         })}
                         options={[
                           { value: 'ai', label: t.screenshotOcrAI },
                           { value: 'baidu', label: t.screenshotOcrBaidu },
+                          { value: 'chaoxing', label: t.screenshotOcrChaoxing },
                           { value: 'system', label: t.screenshotOcrSystem },
                         ]}
                       />
@@ -1494,10 +1395,10 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
                   {settings.lens?.enabled !== false && (
                     <>
                       <div className="px-4 py-3 space-y-1.5">
-                        <span className="text-[12px] font-medium text-neutral-700 dark:text-neutral-200">{t.hotkey}</span>
+                        <span className="text-[12px] font-medium text-neutral-700 dark:text-neutral-200">{t.lensHotkey}</span>
                         <HotkeyInput
-                          value={settings.lens?.hotkey || 'CommandOrControl+Shift+G'}
-                          placeholder="CommandOrControl+Shift+G"
+                          value={settings.lens?.hotkey || 'F3'}
+                          placeholder="F3"
                           recording={recordingTarget === 'lens'}
                           onToggleRecording={() => toggleRecording('lens')}
                           recordLabel={t.hotkeyRecord}
@@ -1901,170 +1802,28 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
                     <span className="text-[13px] text-neutral-700 dark:text-neutral-200">{t.currentVersion}</span>
                     <span className="text-[12px] text-neutral-500 dark:text-neutral-400 font-mono">v{appVersion}</span>
                   </div>
-                  <div className="flex items-center justify-between px-4 py-3">
+                  <div className="flex items-center justify-between px-4 py-3 border-b border-black/[0.04] dark:border-white/[0.05]">
                     <span className="text-[13px] text-neutral-700 dark:text-neutral-200">{lang === 'zh' ? '开发者' : 'Developer'}</span>
+                    <span className="text-[12px] text-neutral-500 dark:text-neutral-400">Wainia</span>
+                  </div>
+                  <div className="flex items-center justify-between px-4 py-3 border-b border-black/[0.04] dark:border-white/[0.05]">
+                    <span className="text-[13px] text-neutral-700 dark:text-neutral-200">{lang === 'zh' ? '原作者' : 'Original author'}</span>
                     <span className="text-[12px] text-neutral-500 dark:text-neutral-400">ZM</span>
                   </div>
-                </div>
-              </div>
-            </section>
-
-            {/* 自动更新检查（仅检查 + 跳转 GH 下载，不做自动安装） */}
-            <section>
-              <SectionTitle icon={Download}>{t.checkUpdate}</SectionTitle>
-              <div className="settings-card overflow-hidden">
-                <SettingRow
-                  label={t.autoCheckUpdate}
-                  description={t.autoCheckUpdateHint}
-                >
-                  <Toggle
-                    checked={settings?.autoCheckUpdate ?? true}
-                    onChange={(v) => updateSettings({ autoCheckUpdate: v })}
-                  />
-                </SettingRow>
-
-                {/* 检查按钮 + 状态 */}
-                <div className="flex items-center justify-between gap-3 px-4 py-3 border-t border-black/[0.04] dark:border-white/[0.05]">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span className="text-[13px] text-neutral-900 dark:text-neutral-100">{t.checkUpdate}</span>
-                    {updateStatus === 'up-to-date' && (
-                      <span className="text-[11px] text-emerald-600 dark:text-emerald-400">{t.upToDate}</span>
-                    )}
+                  <div className="flex items-center justify-between gap-3 px-4 py-3">
+                    <span className="text-[13px] text-neutral-700 dark:text-neutral-200 shrink-0">{lang === 'zh' ? '原项目' : 'Original project'}</span>
+                    <button
+                      type="button"
+                      onClick={handleOpenOriginalProject}
+                      className="min-w-0 inline-flex items-center gap-1 text-[12px] text-neutral-500 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-100 transition-colors"
+                      data-tauri-drag-region="false"
+                      title="https://github.com/ZMGID/kivio"
+                    >
+                      <span className="truncate">https://github.com/ZMGID/kivio</span>
+                      <ExternalLink size={12} className="shrink-0" />
+                    </button>
                   </div>
-                  <button
-                    type="button"
-                    onClick={handleCheckUpdate}
-                    disabled={updateStatus === 'checking'}
-                    className={`flex items-center gap-1 text-[11px] font-medium px-2.5 py-1 rounded-md border transition-all ${
-                      updateStatus === 'checking'
-                        ? 'text-neutral-400 border-black/5 dark:border-white/5 cursor-not-allowed'
-                        : 'text-neutral-600 dark:text-neutral-300 border-black/10 dark:border-white/10 hover:bg-black/5 dark:hover:bg-white/5'
-                    }`}
-                    data-tauri-drag-region="false"
-                  >
-                    <RefreshCw size={11} className={updateStatus === 'checking' ? 'animate-spin' : ''} />
-                    {updateStatus === 'checking' ? t.checkingUpdate : t.checkUpdate}
-                  </button>
                 </div>
-
-                {/* 发现新版本 panel */}
-                {updateStatus === 'available' && updateInfo && (
-                  <div className="px-4 py-4 border-t border-black/[0.04] dark:border-white/[0.05] bg-emerald-50/50 dark:bg-emerald-500/5">
-                    <div className="flex items-baseline gap-2 mb-2">
-                      <span className="text-[13px] font-semibold text-emerald-700 dark:text-emerald-300">{t.updateAvailable}</span>
-                      <span className="text-[12px] font-mono text-emerald-600 dark:text-emerald-400">v{updateInfo.version}</span>
-                    </div>
-                    {updateInfo.body && (
-                      <div className="prose prose-sm dark:prose-invert max-w-none text-[12px] leading-relaxed text-neutral-700 dark:text-neutral-300 max-h-40 overflow-y-auto mb-3 px-2 py-1.5 bg-white/60 dark:bg-black/20 rounded-md">
-                        <ReactMarkdown>{updateInfo.body}</ReactMarkdown>
-                      </div>
-                    )}
-
-                    {/* 下载进度条:downloading 时显示 */}
-                    {downloadState === 'downloading' && (
-                      <div className="mb-3">
-                        <div className="flex items-center justify-between text-[11px] text-neutral-600 dark:text-neutral-400 mb-1">
-                          <span>{t.downloading}</span>
-                          <span className="font-mono tabular-nums">{downloadPercent}%</span>
-                        </div>
-                        <div className="h-1.5 rounded-full bg-emerald-100 dark:bg-emerald-900/40 overflow-hidden">
-                          <div
-                            className="h-full bg-emerald-500 dark:bg-emerald-400 transition-[width] duration-150 ease-out"
-                            style={{ width: `${downloadPercent}%` }}
-                          />
-                        </div>
-                      </div>
-                    )}
-
-                    {/* 错误显示 */}
-                    {downloadState === 'failed' && downloadError && (
-                      <div className="mb-3 px-2 py-1.5 rounded-md bg-red-50 dark:bg-red-500/10 text-[11px] text-red-600 dark:text-red-400 break-words">
-                        {t.downloadFailed}: {downloadError}
-                      </div>
-                    )}
-
-                    <div className="flex gap-2 flex-wrap">
-                      {downloadState === 'idle' && (
-                        <>
-                          <button
-                            type="button"
-                            onClick={handleDownloadAndInstall}
-                            className="flex items-center gap-1.5 text-[12px] font-medium px-3 py-1.5 rounded-md bg-emerald-600 text-white hover:bg-emerald-700 transition-all"
-                            data-tauri-drag-region="false"
-                          >
-                            <Download size={12} />
-                            {t.downloadAndInstall}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={handleOpenReleasePage}
-                            className="flex items-center gap-1.5 text-[12px] font-medium px-3 py-1.5 rounded-md text-neutral-600 dark:text-neutral-400 border border-black/10 dark:border-white/10 hover:bg-black/5 dark:hover:bg-white/5 transition-all"
-                            data-tauri-drag-region="false"
-                          >
-                            <ExternalLink size={12} />
-                            {t.downloadFromGithub}
-                          </button>
-                        </>
-                      )}
-                      {downloadState === 'downloading' && (
-                        <button
-                          type="button"
-                          disabled
-                          className="flex items-center gap-1.5 text-[12px] font-medium px-3 py-1.5 rounded-md bg-emerald-600/60 text-white cursor-not-allowed"
-                        >
-                          <RefreshCw size={12} className="animate-spin" />
-                          {t.downloading}
-                        </button>
-                      )}
-                      {downloadState === 'downloaded' && (
-                        <button
-                          type="button"
-                          onClick={handleInstall}
-                          className="flex items-center gap-1.5 text-[12px] font-medium px-3 py-1.5 rounded-md bg-emerald-600 text-white hover:bg-emerald-700 transition-all"
-                          data-tauri-drag-region="false"
-                        >
-                          <Download size={12} />
-                          {t.installAndRestart}
-                        </button>
-                      )}
-                      {downloadState === 'failed' && (
-                        <>
-                          <button
-                            type="button"
-                            onClick={handleDownloadAndInstall}
-                            className="flex items-center gap-1.5 text-[12px] font-medium px-3 py-1.5 rounded-md bg-emerald-600 text-white hover:bg-emerald-700 transition-all"
-                            data-tauri-drag-region="false"
-                          >
-                            <RefreshCw size={12} />
-                            {t.retryDownload}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={handleOpenReleasePage}
-                            className="flex items-center gap-1.5 text-[12px] font-medium px-3 py-1.5 rounded-md text-neutral-600 dark:text-neutral-400 border border-black/10 dark:border-white/10 hover:bg-black/5 dark:hover:bg-white/5 transition-all"
-                            data-tauri-drag-region="false"
-                          >
-                            <ExternalLink size={12} />
-                            {t.downloadFromGithub}
-                          </button>
-                        </>
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setUpdateStatus('idle')
-                          setDownloadState('idle')
-                          setDownloadPercent(0)
-                          setDownloadError('')
-                        }}
-                        className="text-[12px] font-medium px-3 py-1.5 rounded-md text-neutral-600 dark:text-neutral-400 hover:bg-black/5 dark:hover:bg-white/5 transition-all"
-                        data-tauri-drag-region="false"
-                      >
-                        {t.updateLater}
-                      </button>
-                    </div>
-                  </div>
-                )}
               </div>
             </section>
           </div>

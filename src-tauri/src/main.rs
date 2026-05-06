@@ -39,11 +39,11 @@ use uuid::Uuid;
 
 use api::{
     build_http_client, call_baidu_ocr, call_baidu_translate, call_baidu_tts_data_url,
-    call_bing2_translate, call_bing_translate, call_caiyun2_translate, call_google_translate,
-    call_microsoft_translate, call_openai_ocr, call_openai_text, call_tencent_translate,
-    call_vision_api, call_yandex_translate, effective_retry_attempts, models_url_from_provider_url,
-    resolve_provider_credentials, send_with_failover, send_with_retry, stream_chat_call,
-    ProviderConnectionInput,
+    call_bing2_translate, call_bing_translate, call_caiyun2_translate, call_chaoxing_ocr,
+    call_google_translate, call_microsoft_translate, call_openai_ocr, call_openai_text,
+    call_tencent_translate, call_vision_api, call_yandex_translate, effective_retry_attempts,
+    models_url_from_provider_url, resolve_provider_credentials, send_with_failover,
+    send_with_retry, stream_chat_call, ProviderConnectionInput,
 };
 use prompts::{
     build_screenshot_translation_prompt, build_translation_prompt, DEFAULT_SCREENSHOT_OCR_PROMPT,
@@ -1703,6 +1703,7 @@ async fn recognize_screenshot_text(
             )
             .await
         }
+        "chaoxing" => call_chaoxing_ocr(state, image_path, retry_attempts).await,
         "system" => system_ocr_text(state, image_path).await,
         _ => {
             let (provider, model) = screenshot_model_pair(
@@ -3344,25 +3345,77 @@ fn open_settings_window_for_activation(app: &AppHandle) -> Result<(), String> {
     open_settings_window(app)
 }
 
+#[cfg(target_os = "windows")]
+fn restart_as_administrator(app: &AppHandle) -> Result<(), String> {
+    use ::windows::{
+        core::{w, PCWSTR},
+        Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
+    };
+    use std::{ffi::OsStr, os::windows::ffi::OsStrExt};
+
+    fn wide_null(value: &OsStr) -> Vec<u16> {
+        value.encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe failed: {e}"))?;
+    let exe_w = wide_null(exe.as_os_str());
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            w!("runas"),
+            PCWSTR(exe_w.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+
+    let code = result.0 as isize;
+    if code <= 32 {
+        return Err(format!("ShellExecuteW runas failed: {code}"));
+    }
+
+    app.exit(0);
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn restart_as_administrator(_app: &AppHandle) -> Result<(), String> {
+    Err("Restart as administrator is only supported on Windows".to_string())
+}
+
 /// 根据语言返回托盘菜单的标签文本
-fn tray_labels(lang: &str) -> (&'static str, &'static str, &'static str) {
+fn tray_labels(lang: &str) -> (&'static str, &'static str, &'static str, &'static str) {
     match lang {
-        "en" => ("Show Translator", "Settings", "Quit"),
-        _ => ("显示翻译器", "设置", "退出"),
+        "en" => (
+            "Show Translator",
+            "Settings",
+            "Restart as Administrator",
+            "Quit",
+        ),
+        _ => ("显示翻译器", "设置", "使用管理员身份重启", "退出"),
     }
 }
 
 /// 构建托盘菜单
 fn build_tray_menu(app: &AppHandle, lang: &str) -> Result<tauri::menu::Menu<tauri::Wry>, String> {
     use tauri::menu::{Menu, MenuItem};
-    let (show_label, settings_label, quit_label) = tray_labels(lang);
+    let (show_label, settings_label, restart_admin_label, quit_label) = tray_labels(lang);
     let show = MenuItem::with_id(app, "show", show_label, true, None::<&str>)
         .map_err(|e| e.to_string())?;
     let settings = MenuItem::with_id(app, "settings", settings_label, true, None::<&str>)
         .map_err(|e| e.to_string())?;
+    let restart_admin = MenuItem::with_id(
+        app,
+        "restart_admin",
+        restart_admin_label,
+        true,
+        None::<&str>,
+    )
+    .map_err(|e| e.to_string())?;
     let quit = MenuItem::with_id(app, "quit", quit_label, true, None::<&str>)
         .map_err(|e| e.to_string())?;
-    Menu::with_items(app, &[&show, &settings, &quit]).map_err(|e| e.to_string())
+    Menu::with_items(app, &[&show, &settings, &restart_admin, &quit]).map_err(|e| e.to_string())
 }
 
 /// 设置系统托盘图标和菜单
@@ -3430,6 +3483,11 @@ fn setup_tray(app: &AppHandle) -> Result<(), String> {
             "settings" => {
                 if let Err(err) = open_settings_window(app) {
                     eprintln!("Failed to open settings window: {}", err);
+                }
+            }
+            "restart_admin" => {
+                if let Err(err) = restart_as_administrator(app) {
+                    eprintln!("Failed to restart as administrator: {}", err);
                 }
             }
             "quit" => {
@@ -3527,27 +3585,6 @@ fn main() {
             if let Err(err) = setup_tray(&app.handle()) {
                 eprintln!("Failed to setup tray: {err}");
             }
-
-            // 启动后 5s 静默检查更新（settings.auto_check_update 控制）
-            // 发现新版 → emit "update-available" 事件，前端 Settings 打开时会展示提示
-            // 失败 / 限流 / 网络问题全部静默，不打扰用户
-            let app_handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                let state: State<AppState> = app_handle.state();
-                if !state.settings_read().auto_check_update {
-                    return;
-                }
-                if let Ok(value) = check_github_latest_release(state).await {
-                    if value
-                        .get("available")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false)
-                    {
-                        let _ = app_handle.emit("update-available", value);
-                    }
-                }
-            });
 
             #[cfg(target_os = "windows")]
             {
