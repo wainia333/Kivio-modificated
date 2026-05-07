@@ -33,6 +33,7 @@ use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 #[cfg(target_os = "macos")]
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_autostart::ManagerExt as AutoStartManagerExt;
+use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use tauri_plugin_global_shortcut::ShortcutState;
 use tauri_plugin_shell::ShellExt;
@@ -127,30 +128,109 @@ fn get_default_prompt_templates() -> serde_json::Value {
 /// 如果热键注册失败，则回滚运行时设置到之前的状态
 #[tauri::command]
 fn save_settings(app: AppHandle, state: State<AppState>, settings: Settings) -> Result<(), String> {
+    apply_settings(&app, &state, settings).map(|_| ())
+}
+
+fn apply_settings(
+    app: &AppHandle,
+    state: &State<AppState>,
+    settings: Settings,
+) -> Result<Settings, String> {
     let previous_settings = state.settings_read().clone();
     let sanitized = sanitize_settings(settings);
-    apply_launch_at_startup(&app, sanitized.launch_at_startup)?;
+    apply_launch_at_startup(app, sanitized.launch_at_startup)?;
     {
         let mut guard = state.settings_write();
         *guard = sanitized.clone();
     }
 
-    if let Err(err) = register_hotkeys(&app) {
-        restore_runtime_settings(&app, &state, &previous_settings);
+    if let Err(err) = register_hotkeys(app) {
+        restore_runtime_settings(app, state, &previous_settings);
         return Err(err);
     }
 
-    if let Err(err) = persist_settings(&app, &sanitized) {
+    if let Err(err) = persist_settings(app, &sanitized) {
         eprintln!("Failed to save settings: {err}");
-        restore_runtime_settings(&app, &state, &previous_settings);
+        restore_runtime_settings(app, state, &previous_settings);
         return Err(err);
     }
 
-    if let Err(err) = setup_tray(&app) {
+    if let Err(err) = setup_tray(app) {
         eprintln!("Failed to update tray: {err}");
     }
 
-    Ok(())
+    Ok(sanitized)
+}
+
+#[tauri::command]
+async fn export_settings_config(app: AppHandle, state: State<'_, AppState>) -> Result<bool, String> {
+    let filename = format!(
+        "kivio-settings-{}.json",
+        chrono::Local::now().format("%Y-%m-%d-%H%M%S")
+    );
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app
+        .dialog()
+        .file()
+        .set_title("导出 Kivio 配置")
+        .set_file_name(filename)
+        .add_filter("Kivio Settings", &["json"])
+        .save_file(move |path| {
+            let _ = tx.send(path);
+        });
+    let Some(file_path) = rx
+        .await
+        .map_err(|_| "保存文件对话框已关闭".to_string())?
+    else {
+        return Ok(false);
+    };
+    let mut path = file_path.into_path().map_err(|e| e.to_string())?;
+    if path.extension().is_none() {
+        path.set_extension("json");
+    }
+
+    let settings = state.settings_read().clone();
+    let payload = serde_json::json!({
+        "type": "kivio-settings-export",
+        "schemaVersion": 1,
+        "appVersion": env!("CARGO_PKG_VERSION"),
+        "exportedAt": chrono::Local::now().to_rfc3339(),
+        "settings": settings,
+    });
+    let json = serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?;
+    fs::write(&path, json).map_err(|e| format!("写入配置文件失败: {e}"))?;
+    Ok(true)
+}
+
+#[tauri::command]
+async fn import_settings_config(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<Settings>, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app
+        .dialog()
+        .file()
+        .set_title("导入 Kivio 配置")
+        .add_filter("Kivio Settings", &["json"])
+        .pick_file(move |path| {
+            let _ = tx.send(path);
+        });
+    let Some(file_path) = rx
+        .await
+        .map_err(|_| "打开文件对话框已关闭".to_string())?
+    else {
+        return Ok(None);
+    };
+    let path = file_path.into_path().map_err(|e| e.to_string())?;
+    let raw = fs::read_to_string(&path).map_err(|e| format!("读取配置文件失败: {e}"))?;
+    let value: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("配置文件不是有效 JSON: {e}"))?;
+    let settings_value = value.get("settings").cloned().unwrap_or(value);
+    let imported: Settings = serde_json::from_value(settings_value)
+        .map_err(|e| format!("配置文件格式不正确: {e}"))?;
+    let sanitized = apply_settings(&app, &state, imported)?;
+    Ok(Some(sanitized))
 }
 
 /// 翻译文本命令
@@ -4345,6 +4425,8 @@ fn main() {
             get_settings,
             get_default_prompt_templates,
             save_settings,
+            export_settings_config,
+            import_settings_config,
             translate_text,
             optimize_prompt,
             commit_translation,

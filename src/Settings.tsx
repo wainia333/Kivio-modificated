@@ -3,7 +3,8 @@ import {
   X, Save, Plus, Trash2, RefreshCw,
   Settings as SettingsIcon, Languages, Camera,
   Cloud, Info, Palette, Keyboard, SlidersHorizontal, Globe,
-  Cpu, FileText, ShieldCheck, Aperture, ExternalLink, ChevronRight, Sparkles
+  Cpu, FileText, ShieldCheck, Aperture, ExternalLink, ChevronRight, Sparkles,
+  Download, Upload
 } from 'lucide-react'
 import { open } from '@tauri-apps/plugin-dialog'
 import { api, type Settings as SettingsType, type ModelProvider, type DefaultPromptTemplates, type PermissionStatus } from './api/tauri'
@@ -46,6 +47,8 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
   const [permissionsLoading, setPermissionsLoading] = useState(false)
   const [testingProviderId, setTestingProviderId] = useState<string | null>(null)
   const [providerTestFeedback, setProviderTestFeedback] = useState<Record<string, { ok: boolean; message: string }>>({})
+  const [configTransferBusy, setConfigTransferBusy] = useState<null | 'export' | 'import'>(null)
+  const [successMessage, setSuccessMessage] = useState('')
   // Apple Intelligence sidecar 可用性：mount 时查一次,unavailable 就把 onDevice 预设 chip 隐藏
   const [appleIntelligenceAvailable, setAppleIntelligenceAvailable] = useState(false)
   // 加载失败时的错误信息；非空则渲染错误 UI 而不是用合成默认值进入正常视图
@@ -165,6 +168,20 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
     setRetryAttemptsInput(String(retryAttempts ?? 3))
   }, [retryAttempts])
 
+  const showSuccessMessage = useCallback((message: string) => {
+    if (saveSuccessTimerRef.current) {
+      clearTimeout(saveSuccessTimerRef.current)
+      saveSuccessTimerRef.current = null
+    }
+    setSuccessMessage(message)
+    setSaveSuccess(true)
+    saveSuccessTimerRef.current = setTimeout(() => {
+      setSaveSuccess(false)
+      setSuccessMessage('')
+      saveSuccessTimerRef.current = null
+    }, 2200)
+  }, [])
+
   /**
    * 保存设置
    */
@@ -181,11 +198,7 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
       await api.saveSettings(settings)
       setInitialSettingsSnapshot(JSON.stringify(settings))
       onSettingsChange()
-      setSaveSuccess(true)
-      saveSuccessTimerRef.current = setTimeout(() => {
-        setSaveSuccess(false)
-        saveSuccessTimerRef.current = null
-      }, 2200)
+      showSuccessMessage(t.saved)
       return true
     } catch (err) {
       console.error('Failed to save settings:', err)
@@ -197,7 +210,57 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
     } finally {
       setSaving(false)
     }
-  }, [lang, onSettingsChange, settings])
+  }, [lang, onSettingsChange, settings, showSuccessMessage, t.saved])
+
+  const handleExportConfig = useCallback(async () => {
+    if (!settings || configTransferBusy) return
+    setConfigTransferBusy('export')
+    setSaveError('')
+    setSaveSuccess(false)
+    try {
+      if (hasUnsavedChanges) {
+        const saved = await handleSave()
+        if (!saved) return
+      }
+      const exported = await api.exportSettingsConfig()
+      if (exported) {
+        showSuccessMessage(t.configExported)
+      }
+    } catch (err) {
+      console.error('Failed to export settings config:', err)
+      const message = err instanceof Error ? err.message : String(err)
+      setSaveError(`${t.configExportFailed}${message.replace(/\n/g, ' / ')}`)
+      setSaveSuccess(false)
+    } finally {
+      setConfigTransferBusy(null)
+    }
+  }, [configTransferBusy, handleSave, hasUnsavedChanges, settings, showSuccessMessage, t.configExportFailed, t.configExported])
+
+  const handleImportConfig = useCallback(async () => {
+    if (configTransferBusy) return
+    if (hasUnsavedChanges && !window.confirm(t.configImportUnsavedConfirm)) {
+      return
+    }
+    setConfigTransferBusy('import')
+    setSaveError('')
+    setSaveSuccess(false)
+    try {
+      const imported = await api.importSettingsConfig()
+      if (!imported) return
+      setSettings(imported)
+      setInitialSettingsSnapshot(JSON.stringify(imported))
+      setRetryAttemptsInput(String(imported.retryAttempts ?? 3))
+      onSettingsChange()
+      showSuccessMessage(t.configImported)
+    } catch (err) {
+      console.error('Failed to import settings config:', err)
+      const message = err instanceof Error ? err.message : String(err)
+      setSaveError(`${t.configImportFailed}${message.replace(/\n/g, ' / ')}`)
+      setSaveSuccess(false)
+    } finally {
+      setConfigTransferBusy(null)
+    }
+  }, [configTransferBusy, hasUnsavedChanges, onSettingsChange, showSuccessMessage, t.configImportFailed, t.configImportUnsavedConfirm, t.configImported])
 
   useEffect(() => {
     return () => {
@@ -849,6 +912,37 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
         {/* ===== 基础设置标签页 ===== */}
         {activeTab === 'general' && (
           <div className="space-y-8 animate-in fade-in slide-in-from-bottom-2 duration-300">
+            {/* 配置迁移 */}
+            <section>
+              <SectionTitle icon={FileText}>{t.configMigration}</SectionTitle>
+              <div className="settings-card overflow-hidden">
+                <SettingRow label={t.configMigrationTitle} description={t.configMigrationHint}>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleExportConfig}
+                      disabled={!!configTransferBusy || saving}
+                      className="flex items-center gap-1.5 px-3 h-[32px] rounded-md text-[12px] font-medium border border-black/10 dark:border-white/10 text-neutral-600 dark:text-neutral-300 hover:text-neutral-900 dark:hover:text-neutral-100 hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                      data-tauri-drag-region="false"
+                    >
+                      {configTransferBusy === 'export' ? <RefreshCw size={13} className="animate-spin" /> : <Upload size={13} />}
+                      {configTransferBusy === 'export' ? t.configExporting : t.configExport}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleImportConfig}
+                      disabled={!!configTransferBusy || saving}
+                      className="flex items-center gap-1.5 px-3 h-[32px] rounded-md text-[12px] font-medium bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 hover:bg-neutral-800 dark:hover:bg-neutral-100 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                      data-tauri-drag-region="false"
+                    >
+                      {configTransferBusy === 'import' ? <RefreshCw size={13} className="animate-spin" /> : <Download size={13} />}
+                      {configTransferBusy === 'import' ? t.configImporting : t.configImport}
+                    </button>
+                  </div>
+                </SettingRow>
+              </div>
+            </section>
+
             {/* 外观 */}
             <section>
               <SectionTitle icon={Palette}>{lang === 'zh' ? '外观' : 'Appearance'}</SectionTitle>
@@ -2042,7 +2136,7 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
           {saveSuccess && !saveError && (
             <span className="text-[11px] text-emerald-600 dark:text-emerald-400 flex items-center gap-1">
               <span className="w-1 h-1 rounded-full bg-emerald-500" />
-              {t.saved}
+              {successMessage || t.saved}
             </span>
           )}
         </div>
