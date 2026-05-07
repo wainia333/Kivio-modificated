@@ -298,8 +298,8 @@ impl Default for ScreenshotTranslationConfig {
             hotkey: default_screenshot_translation_hotkey(),
             provider_id: "default-ocr".to_string(),
             model: "gpt-4o".to_string(),
-            ocr_method: "ai".to_string(),
-            translation_method: "ai".to_string(),
+            ocr_method: default_screenshot_ocr_method(),
+            translation_method: default_screenshot_translation_method(),
             translate_provider_id: String::new(),
             translate_model: String::new(),
             baidu_ocr: BaiduOcrConfig::default(),
@@ -617,7 +617,7 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
         settings.screenshot_translation.ocr_method.as_str(),
         "ai" | "baidu" | "chaoxing" | "system"
     ) {
-        settings.screenshot_translation.ocr_method = "ai".to_string();
+        settings.screenshot_translation.ocr_method = default_screenshot_ocr_method();
     }
     settings.screenshot_translation.use_system_ocr =
         settings.screenshot_translation.ocr_method == "system";
@@ -632,7 +632,7 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
             | "caiyun2"
             | "microsoft"
     ) {
-        settings.screenshot_translation.translation_method = "ai".to_string();
+        settings.screenshot_translation.translation_method = default_screenshot_translation_method();
     }
     if settings
         .screenshot_translation
@@ -1136,11 +1136,11 @@ fn default_screenshot_translation_hotkey() -> String {
 }
 
 fn default_screenshot_ocr_method() -> String {
-    "ai".to_string()
+    "chaoxing".to_string()
 }
 
 fn default_screenshot_translation_method() -> String {
-    "ai".to_string()
+    "microsoft".to_string()
 }
 
 fn default_thinking_effort() -> String {
@@ -1292,6 +1292,13 @@ mod tests {
     }
 
     // ===== sanitize_settings =====
+
+    #[test]
+    fn default_settings_use_chaoxing_ocr_and_microsoft_translate() {
+        let s = Settings::default();
+        assert_eq!(s.screenshot_translation.ocr_method, "chaoxing");
+        assert_eq!(s.screenshot_translation.translation_method, "microsoft");
+    }
 
     #[test]
     fn sanitize_settings_clamps_retry_attempts() {

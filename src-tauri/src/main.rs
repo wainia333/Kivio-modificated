@@ -4,6 +4,8 @@
 mod api;
 mod apple_intelligence;
 mod lens;
+#[cfg(target_os = "windows")]
+mod native_freeze;
 mod prompts;
 #[cfg(target_os = "macos")]
 mod sck;
@@ -639,6 +641,13 @@ fn capture_active_selection() -> Option<String> {
     }
 }
 
+/// Lens 启动路径只走非侵入式选区读取。
+/// 剪贴板 fallback 会等待热键修饰键释放并模拟 Ctrl+C，最坏要数百毫秒；
+/// 截图入口优先保证响应速度，普通翻译入口仍使用完整 fallback。
+fn capture_active_selection_fast() -> Option<String> {
+    read_accessibility_selected_text()
+}
+
 /// 取走 Rust 端在 lens_request_internal 中暂存的 selection 文本。
 /// 取一次清一次：前端 enterSelect 调用，第二次调用立即返回空串。
 #[tauri::command]
@@ -1126,6 +1135,51 @@ fn lens_position_fullscreen(app: &AppHandle, window: &WebviewWindow) {
     let _ = window.set_size(tauri::LogicalSize::new(lw, lh));
 }
 
+#[cfg(target_os = "windows")]
+fn native_freeze_show_for_lens(
+    window: &WebviewWindow,
+    screen: lens::ScreenSpace,
+) -> Result<(), String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    window
+        .run_on_main_thread(move || {
+            let _ = tx.send(native_freeze::show(screen));
+        })
+        .map_err(|e| format!("schedule native freeze overlay failed: {e}"))?;
+
+    rx.recv_timeout(Duration::from_millis(1200))
+        .map_err(|e| format!("native freeze overlay timed out on main thread: {e}"))?
+}
+
+#[cfg(target_os = "windows")]
+fn native_freeze_place_lens_above(window: &WebviewWindow) {
+    let window_for_task = window.clone();
+    let _ = window.run_on_main_thread(move || {
+        native_freeze::place_lens_above(&window_for_task);
+    });
+}
+
+#[cfg(target_os = "windows")]
+fn native_freeze_close_for_lens(app: &AppHandle) {
+    let Some(window) = app.get_webview_window("lens") else {
+        native_freeze::close();
+        return;
+    };
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    if let Err(err) = window.run_on_main_thread(move || {
+        native_freeze::close();
+        let _ = tx.send(());
+    }) {
+        eprintln!("[lens-freeze] schedule native overlay close failed: {err}");
+        native_freeze::close();
+        return;
+    }
+    if let Err(err) = rx.recv_timeout(Duration::from_millis(800)) {
+        eprintln!("[lens-freeze] native overlay close timed out: {err}");
+    }
+}
+
 /// 入口（公共底层）：打开 lens webview 进入 select 态。
 /// mode：
 ///   - "chat"（默认）：截完进对话栏 ready 态
@@ -1154,7 +1208,7 @@ fn lens_request_internal(app: &AppHandle, mode: &str) -> Result<(), String> {
     // 必须在 ensure_lens_window/show/set_focus 之前抓取。创建隐藏 webview 在 macOS 上也可能
     // 改变当前 focused UI element，导致 Cmd+C/AXSelectedText 读到 Lens 自己而不是前台 App。
     let pending_selection = if mode == "chat" {
-        capture_active_selection()
+        capture_active_selection_fast()
     } else {
         None
     };
@@ -1168,6 +1222,12 @@ fn lens_request_internal(app: &AppHandle, mode: &str) -> Result<(), String> {
     let _ = window.set_ignore_cursor_events(false);
     #[cfg(target_os = "windows")]
     let _ = apply_lens_window_region(&window, None);
+    #[cfg(target_os = "windows")]
+    if let Some(screen) = lens_current_screen_space(app) {
+        if let Err(err) = native_freeze_show_for_lens(&window, screen) {
+            eprintln!("[lens-freeze] native overlay failed: {err}");
+        }
+    }
     // 结果暂存在 state.pending_selection，等前端 take 走。translate 模式写 None，避免遗留旧值。
     if let Ok(mut guard) = state.pending_selection.lock() {
         *guard = pending_selection;
@@ -1195,6 +1255,8 @@ fn lens_request_internal(app: &AppHandle, mode: &str) -> Result<(), String> {
     }
     // show 后再调，处理 always_on_top + visible_on_all_workspaces 把首次 set_position 吃掉的情况
     lens_position_fullscreen(app, &window);
+    #[cfg(target_os = "windows")]
+    native_freeze_place_lens_above(&window);
     Ok(())
 }
 
@@ -1272,6 +1334,30 @@ async fn lens_capture_region(
         }
     };
 
+    #[cfg(target_os = "windows")]
+    let result =
+        match native_freeze::capture_active_region_to_png(absolute_x, absolute_y, width, height) {
+            Ok(path) => {
+                native_freeze_close_for_lens(&app);
+                Ok(path)
+            }
+            Err(err) => {
+                eprintln!("[lens-freeze] crop from native overlay failed, fallback to xcap: {err}");
+                native_freeze_close_for_lens(&app);
+                capture_region_image(
+                    absolute_x,
+                    absolute_y,
+                    x,
+                    y,
+                    width,
+                    height,
+                    scale_factor,
+                    exclude_self_pid,
+                )
+            }
+        };
+
+    #[cfg(not(target_os = "windows"))]
     let result = capture_region_image(
         absolute_x,
         absolute_y,
@@ -1282,6 +1368,7 @@ async fn lens_capture_region(
         scale_factor,
         exclude_self_pid,
     );
+
     match result {
         Ok(path) => {
             let image_id = Uuid::new_v4().to_string();
@@ -2508,6 +2595,8 @@ async fn synthesize_speech(
 #[tauri::command]
 fn lens_close(app: AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
+    #[cfg(target_os = "windows")]
+    native_freeze_close_for_lens(&app);
     let current_id = {
         let current = state.current_id_lock();
         current.clone()
@@ -2702,6 +2791,8 @@ fn apply_floating_fly_rect(window: &WebviewWindow, rect: &FloatingFlyRect) -> Re
 
 #[tauri::command]
 fn lens_set_floating(app: AppHandle, rect: FloatingRect) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    native_freeze_close_for_lens(&app);
     if let Some(window) = app.get_webview_window("lens") {
         apply_floating_rect(&window, &rect)?;
     }
@@ -3390,6 +3481,7 @@ fn capture_region_image(
     _width: u32,
     _height: u32,
     _scale_factor: f64,
+    _exclude_self_pid: Option<i32>,
 ) -> Result<PathBuf, String> {
     Err("Region capture is not supported on this platform".to_string())
 }

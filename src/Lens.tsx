@@ -1450,19 +1450,6 @@ export default function Lens() {
     fullscreenMetricsRef.current = null
     chatAutoFollowRef.current = true
     resetLensStreamBuffer()
-    // 重新加载设置：用户在设置面板修改后关闭再打开 Lens，需要读到最新值。按当前 mode 选 lens / screenshotTranslation 配置。
-    try {
-      const settings = await api.getSettings()
-      const curMode = readModeFromHash()
-      const cfg = curMode === 'translate' ? settings.screenshotTranslation : settings.lens
-      setActiveLensModel(resolveLensModelLabel(settings))
-      setKeepFullscreen(cfg?.keepFullscreenAfterCapture !== false)
-      if (curMode === 'translate') {
-        setShowTranslateOriginal(!(settings.screenshotTranslation?.directTranslate ?? false))
-        setTranslateOcrMethod(resolveScreenshotOcrMethod(settings))
-        setTranslateMethod(resolveScreenshotTranslationMethod(settings))
-      }
-    } catch (err) { console.error('Failed to reload settings', err) }
     // 防御：reset 流程会 setMessages([]) + setStreaming(false)，理论上 messages.length===0 effect 不会进
     // 持久化分支，但显式清零更稳
     justFinishedStreamRef.current = false
@@ -1509,6 +1496,20 @@ export default function Lens() {
       setBarIntro(false)
     })
     imageIdRef.current = ''
+    // 重新加载设置：用户在设置面板修改后关闭再打开 Lens，需要读到最新值。按当前 mode 选 lens / screenshotTranslation 配置。
+    // 首帧 reset 先同步提交，避免等待设置读取时露出上一轮 Lens surface。
+    try {
+      const settings = await api.getSettings()
+      const curMode = readModeFromHash()
+      const cfg = curMode === 'translate' ? settings.screenshotTranslation : settings.lens
+      setActiveLensModel(resolveLensModelLabel(settings))
+      setKeepFullscreen(cfg?.keepFullscreenAfterCapture !== false)
+      if (curMode === 'translate') {
+        setShowTranslateOriginal(!(settings.screenshotTranslation?.directTranslate ?? false))
+        setTranslateOcrMethod(resolveScreenshotOcrMethod(settings))
+        setTranslateMethod(resolveScreenshotTranslationMethod(settings))
+      }
+    } catch (err) { console.error('Failed to reload settings', err) }
     hoverAnimationRef.current.rect = null
     if (hoverAnimationRef.current.raf !== null) {
       cancelAnimationFrame(hoverAnimationRef.current.raf)

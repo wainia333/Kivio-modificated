@@ -568,8 +568,8 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
         hotkey: 'F4',
         providerId: 'default-ocr',
         model: 'gpt-4o',
-        ocrMethod: 'ai',
-        translationMethod: 'ai',
+        ocrMethod: 'chaoxing',
+        translationMethod: 'microsoft',
         translateProviderId: '',
         translateModel: '',
         baiduOcr: {
