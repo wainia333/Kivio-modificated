@@ -27,8 +27,8 @@ use base64::{engine::general_purpose, Engine as _};
 use chrono::{TimeZone, Utc};
 use hmac::{Hmac, Mac};
 use reqwest::{
-    header::{HeaderMap, CONTENT_TYPE},
-    Client, StatusCode,
+    header::{HeaderMap, ACCEPT, ACCEPT_ENCODING, CACHE_CONTROL, CONTENT_TYPE},
+    Client, RequestBuilder, StatusCode,
 };
 use serde::Deserialize;
 use sha2::Sha256;
@@ -120,6 +120,40 @@ pub fn build_http_client() -> Client {
 const RETRY_BASE_DELAY_MS: u64 = 500;
 /// 重试延迟最大值（毫秒）
 const RETRY_MAX_DELAY_MS: u64 = 10_000;
+/// 流式模型调用允许更长时间。Responses + reasoning(high) + web_search 可能在首段最终文本前等待很久。
+const STREAM_REQUEST_TIMEOUT_SECS: u64 = 1800;
+const STREAM_CANCEL_POLL_MS: u64 = 200;
+const STREAM_FALLBACK_CHUNK_CHARS: usize = 24;
+const STREAM_FALLBACK_CHUNK_DELAY_MS: u64 = 12;
+
+fn configure_sse_request(request: RequestBuilder) -> RequestBuilder {
+    request
+        .header(ACCEPT, "text/event-stream")
+        .header(ACCEPT_ENCODING, "identity")
+        .header(CACHE_CONTROL, "no-cache")
+        .timeout(Duration::from_secs(STREAM_REQUEST_TIMEOUT_SECS))
+}
+
+fn reqwest_error_details(error: &reqwest::Error) -> String {
+    let mut message = error.to_string();
+    let mut source = std::error::Error::source(error);
+    let mut depth = 0;
+
+    while let Some(err) = source {
+        let detail = err.to_string();
+        if !detail.is_empty() && !message.contains(&detail) {
+            message.push_str(": ");
+            message.push_str(&detail);
+        }
+        source = err.source();
+        depth += 1;
+        if depth >= 4 {
+            break;
+        }
+    }
+
+    message
+}
 
 /// 获取实际的重试次数
 /// 如果重试功能被禁用，则返回 1（即只尝试一次）
@@ -425,6 +459,151 @@ fn apply_openai_web_search(body: &mut serde_json::Value, web_search: bool) {
     }
 }
 
+fn normalize_thinking_effort(effort: &str) -> &'static str {
+    match effort.trim().to_ascii_lowercase().as_str() {
+        "low" => "low",
+        "high" => "high",
+        "xhigh" => "xhigh",
+        _ => "medium",
+    }
+}
+
+fn thinking_budget_for_effort(effort: &str) -> u64 {
+    match normalize_thinking_effort(effort) {
+        "low" => 2_000,
+        "medium" => 20_000,
+        "high" => 64_000,
+        "xhigh" => 128_000,
+        _ => 20_000,
+    }
+}
+
+fn remove_body_keys(body: &mut serde_json::Value, keys: &[&str]) {
+    if let Some(obj) = body.as_object_mut() {
+        for key in keys {
+            obj.remove(*key);
+        }
+    }
+}
+
+fn provider_reasoning_key(provider: &settings::ModelProvider, model: &str) -> String {
+    format!("{} {} {}", provider.id, provider.base_url, model).to_ascii_lowercase()
+}
+
+fn apply_responses_reasoning(
+    body: &mut serde_json::Value,
+    provider: &settings::ModelProvider,
+    model: &str,
+    thinking_enabled: bool,
+    thinking_effort: &str,
+) {
+    remove_body_keys(
+        body,
+        &[
+            "reasoning",
+            "reasoning_effort",
+            "thinking",
+            "enable_thinking",
+            "thinking_budget",
+            "thinking_mode",
+        ],
+    );
+    if !thinking_enabled {
+        return;
+    }
+
+    let key = provider_reasoning_key(provider, model);
+    if key.contains("dashscope") || key.contains("aliyun") {
+        body["enable_thinking"] = serde_json::json!(true);
+        return;
+    }
+
+    let effort = normalize_thinking_effort(thinking_effort);
+    body["reasoning"] = serde_json::json!({
+      "summary": "auto",
+      "effort": effort
+    });
+}
+
+fn apply_chat_reasoning(
+    body: &mut serde_json::Value,
+    provider: &settings::ModelProvider,
+    model: &str,
+    thinking_enabled: bool,
+    thinking_effort: &str,
+) {
+    remove_body_keys(
+        body,
+        &[
+            "reasoning",
+            "reasoning_effort",
+            "thinking",
+            "enable_thinking",
+            "thinking_budget",
+            "thinking_mode",
+        ],
+    );
+
+    let key = provider_reasoning_key(provider, model);
+    let effort = normalize_thinking_effort(thinking_effort);
+    let budget = thinking_budget_for_effort(effort);
+
+    if key.contains("openrouter.ai") {
+        body["reasoning"] = if thinking_enabled {
+            serde_json::json!({ "enabled": true, "max_tokens": budget })
+        } else {
+            serde_json::json!({ "enabled": false })
+        };
+        return;
+    }
+
+    if key.contains("dashscope") || key.contains("aliyun") {
+        body["enable_thinking"] = serde_json::json!(thinking_enabled);
+        if thinking_enabled {
+            body["thinking_budget"] = serde_json::json!(budget);
+        }
+        return;
+    }
+
+    if key.contains("siliconflow") {
+        if thinking_enabled {
+            body["thinking_budget"] = serde_json::json!(budget);
+        } else {
+            body["enable_thinking"] = serde_json::json!(false);
+        }
+        return;
+    }
+
+    if key.contains("intern-ai") || key.contains("intern") || key.contains("chat.intern-ai.org.cn")
+    {
+        body["thinking_mode"] = serde_json::json!(thinking_enabled);
+        return;
+    }
+
+    if key.contains("open.bigmodel.cn")
+        || key.contains("bigmodel")
+        || key.contains("xiaomimimo")
+        || key.contains("mimo-")
+        || key.contains("ark.cn-beijing.volces.com")
+        || key.contains("volc")
+        || key.contains("ark")
+        || key.contains("deepseek")
+        || key.contains("kimi-k2-thinking")
+        || key.contains("kimi-k2.5")
+    {
+        body["thinking"] = serde_json::json!({
+          "type": if thinking_enabled { "enabled" } else { "disabled" }
+        });
+        return;
+    }
+
+    if thinking_enabled {
+        body["reasoning_effort"] = serde_json::json!(effort);
+    } else {
+        body["thinking"] = serde_json::json!({ "type": "disabled" });
+    }
+}
+
 fn responses_text_content_for_role(role: &str, text: impl Into<String>) -> serde_json::Value {
     if role == "assistant" {
         responses_output_text(text)
@@ -521,6 +700,25 @@ fn response_max_output_tokens_from_body(body: &serde_json::Value, default_value:
         .unwrap_or(default_value)
 }
 
+fn responses_max_output_tokens(
+    default_value: u64,
+    thinking_enabled: bool,
+    thinking_effort: &str,
+) -> u64 {
+    if !thinking_enabled {
+        return default_value;
+    }
+
+    let minimum = match normalize_thinking_effort(thinking_effort) {
+        "low" => 8_000,
+        "medium" => 16_000,
+        "high" => 25_000,
+        "xhigh" => 32_000,
+        _ => 16_000,
+    };
+    default_value.max(minimum)
+}
+
 async fn read_json_response(
     response: reqwest::Response,
     label: &str,
@@ -545,6 +743,41 @@ async fn read_json_response(
     })?;
 
     Ok((raw, value))
+}
+
+fn response_incomplete_reason(value: &serde_json::Value) -> Option<String> {
+    let response = value.get("response").unwrap_or(value);
+    let status = response.get("status").and_then(|v| v.as_str())?;
+    if status != "incomplete" {
+        return None;
+    }
+
+    Some(
+        response
+            .get("incomplete_details")
+            .and_then(|v| v.get("reason"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string(),
+    )
+}
+
+fn response_stream_delta_text(value: &serde_json::Value) -> Option<String> {
+    value
+        .get("delta")
+        .and_then(|v| {
+            v.as_str().map(str::to_string).or_else(|| {
+                v.get("text")
+                    .and_then(|text| text.as_str())
+                    .map(str::to_string)
+            })
+        })
+        .or_else(|| {
+            value
+                .get("text")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
 }
 
 fn response_output_text(value: &serde_json::Value) -> Option<String> {
@@ -577,20 +810,35 @@ fn response_output_text(value: &serde_json::Value) -> Option<String> {
     }
 }
 
+fn response_stream_done_text(value: &serde_json::Value) -> Option<String> {
+    response_stream_delta_text(value)
+        .or_else(|| value.get("part").and_then(response_output_text))
+        .or_else(|| value.get("item").and_then(response_output_text))
+        .or_else(|| value.get("response").and_then(response_output_text))
+}
+
 fn parse_response_output_text(
     raw: &str,
     value: &serde_json::Value,
     label: &str,
 ) -> Result<String, String> {
-    response_output_text(value)
+    if let Some(text) = response_output_text(value)
         .map(|text| text.trim().to_string())
         .filter(|text| !text.is_empty())
-        .ok_or_else(|| {
-            format!(
-                "Invalid {label} response: {}",
-                raw.chars().take(500).collect::<String>()
-            )
-        })
+    {
+        return Ok(text);
+    }
+
+    if let Some(reason) = response_incomplete_reason(value) {
+        return Err(format!(
+            "{label} incomplete: {reason}. 当前思考/搜索可能耗尽了输出 token，请降低思考强度或稍后重试。"
+        ));
+    }
+
+    Err(format!(
+        "Invalid {label} response: {}",
+        raw.chars().take(500).collect::<String>()
+    ))
 }
 
 fn responses_stream_error(value: &serde_json::Value) -> String {
@@ -613,10 +861,11 @@ pub async fn call_openai_text(
     prompt: String,
     retry_attempts: usize,
     thinking_enabled: bool,
+    thinking_effort: &str,
 ) -> Result<String, String> {
     // Apple Intelligence(端上)路由：跳过 HTTP，直接调 sidecar。model/retry/thinking 三个参数全部忽略。
     if config.base_url == APPLE_INTELLIGENCE_BASE_URL {
-        let _ = (model, retry_attempts, thinking_enabled);
+        let _ = (model, retry_attempts, thinking_enabled, thinking_effort);
         return state.apple_intelligence.call_text(&prompt).await;
     }
 
@@ -625,9 +874,10 @@ pub async fn call_openai_text(
         let mut body = serde_json::json!({
           "model": model,
           "input": [responses_text_message("user", prompt)],
-          "max_output_tokens": 2000
+          "max_output_tokens": responses_max_output_tokens(2000, thinking_enabled, thinking_effort)
         });
         apply_openai_web_search(&mut body, true);
+        apply_responses_reasoning(&mut body, config, model, thinking_enabled, thinking_effort);
 
         let response = send_with_failover(
             state,
@@ -656,9 +906,7 @@ pub async fn call_openai_text(
       "messages": [{ "role": "user", "content": prompt }],
       "temperature": 0.2
     });
-    if !thinking_enabled {
-        body["thinking"] = serde_json::json!({ "type": "disabled" });
-    }
+    apply_chat_reasoning(&mut body, config, model, thinking_enabled, thinking_effort);
 
     let response = send_with_failover(
         state,
@@ -699,6 +947,7 @@ pub async fn call_openai_ocr(
     prompt: &str,
     retry_attempts: usize,
     thinking_enabled: bool,
+    thinking_effort: &str,
 ) -> Result<String, String> {
     if config.base_url == APPLE_INTELLIGENCE_BASE_URL {
         let _ = (
@@ -708,6 +957,7 @@ pub async fn call_openai_ocr(
             prompt,
             retry_attempts,
             thinking_enabled,
+            thinking_effort,
         );
         return Err(
             "Apple Intelligence 暂不支持图像输入,请为截图/视觉功能配置云端 provider".into(),
@@ -718,7 +968,7 @@ pub async fn call_openai_ocr(
 
     if provider_endpoint_kind(&config.base_url) == ModelEndpointKind::Responses {
         let url = responses_api_url(&config.base_url);
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
           "model": model,
           "input": [
             {
@@ -729,8 +979,9 @@ pub async fn call_openai_ocr(
               ]
             }
           ],
-          "max_output_tokens": 2000
+          "max_output_tokens": responses_max_output_tokens(2000, thinking_enabled, thinking_effort)
         });
+        apply_responses_reasoning(&mut body, config, model, thinking_enabled, thinking_effort);
 
         let response = send_with_failover(
             state,
@@ -777,9 +1028,7 @@ pub async fn call_openai_ocr(
       "temperature": 0.2,
       "max_tokens": 2000
     });
-    if !thinking_enabled {
-        body["thinking"] = serde_json::json!({ "type": "disabled" });
-    }
+    apply_chat_reasoning(&mut body, config, model, thinking_enabled, thinking_effort);
 
     let response = send_with_failover(
         state,
@@ -2345,6 +2594,8 @@ pub async fn call_vision_api(
     model_override: Option<&str>,
     system_prompt_override: Option<&str>,
     thinking_enabled: bool,
+    thinking_effort: &str,
+    web_search_enabled: bool,
 ) -> Result<String, String> {
     let settings = state.settings_read().clone();
     let provider_id = provider_id_override
@@ -2421,12 +2672,20 @@ pub async fn call_vision_api(
         let mut body = serde_json::json!({
           "model": model,
           "input": chat_messages_to_responses_input(&serde_json::Value::Array(api_messages.clone())),
-          "max_output_tokens": 2000
+          "max_output_tokens": responses_max_output_tokens(2000, thinking_enabled, thinking_effort)
         });
         if stream {
             body["stream"] = serde_json::json!(true);
+            body["stream_options"] = serde_json::json!({ "include_obfuscation": false });
         }
-        apply_openai_web_search(&mut body, true);
+        apply_openai_web_search(&mut body, web_search_enabled);
+        apply_responses_reasoning(
+            &mut body,
+            provider,
+            model,
+            thinking_enabled,
+            thinking_effort,
+        );
 
         let response = send_with_failover(
             state,
@@ -2435,12 +2694,13 @@ pub async fn call_vision_api(
             &provider.id,
             &provider.api_keys,
             |key| {
-                state
-                    .http
-                    .post(url.clone())
-                    .bearer_auth(key)
-                    .json(&body)
-                    .send()
+                let request = state.http.post(url.clone()).bearer_auth(key).json(&body);
+                let request = if stream {
+                    configure_sse_request(request)
+                } else {
+                    request
+                };
+                request.send()
             },
         )
         .await?;
@@ -2498,13 +2758,13 @@ pub async fn call_vision_api(
         body["stream"] = serde_json::json!(true);
     }
 
-    // 关闭思考模式：仅塞 DeepSeek/Kimi 官方文档约定的 thinking={type:"disabled"} 字段。
-    // 不再注入 chat_template_kwargs / enable_thinking / reasoning_effort —— 这些是 vLLM/Qwen/OpenAI
-    // 私有字段，第三方代理（如 OpenRouter / 反代）做严格校验时会以 400 拒绝整个请求（实测 DeepSeek
-    // 路径上 chat_template_kwargs 直接报错）。提示词层的 no-think 指令是更稳的兜底。
-    if !thinking_enabled {
-        body["thinking"] = serde_json::json!({ "type": "disabled" });
-    }
+    apply_chat_reasoning(
+        &mut body,
+        provider,
+        model,
+        thinking_enabled,
+        thinking_effort,
+    );
 
     let response = send_with_failover(
         state,
@@ -2513,12 +2773,13 @@ pub async fn call_vision_api(
         &provider.id,
         &provider.api_keys,
         |key| {
-            state
-                .http
-                .post(url.clone())
-                .bearer_auth(key)
-                .json(&body)
-                .send()
+            let request = state.http.post(url.clone()).bearer_auth(key).json(&body);
+            let request = if stream {
+                configure_sse_request(request)
+            } else {
+                request
+            };
+            request.send()
         },
     )
     .await?;
@@ -2579,6 +2840,106 @@ pub async fn call_vision_api(
 
 // ===== SSE 流 =====
 
+fn stream_text_suffix(full: &str, text: &str) -> String {
+    if text.is_empty() {
+        String::new()
+    } else if full.is_empty() {
+        text.to_string()
+    } else if text.starts_with(full) {
+        text[full.len()..].to_string()
+    } else {
+        String::new()
+    }
+}
+
+fn split_stream_chunks(text: &str) -> Vec<&str> {
+    let char_count = text.chars().count();
+    if char_count <= STREAM_FALLBACK_CHUNK_CHARS {
+        return vec![text];
+    }
+
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    let mut count = 0;
+    for (idx, _) in text.char_indices() {
+        if count >= STREAM_FALLBACK_CHUNK_CHARS {
+            chunks.push(&text[start..idx]);
+            start = idx;
+            count = 0;
+        }
+        count += 1;
+    }
+    if start < text.len() {
+        chunks.push(&text[start..]);
+    }
+    chunks
+}
+
+async fn emit_responses_text_delta(
+    app: &AppHandle,
+    event_name: &str,
+    image_id: &str,
+    kind: &str,
+    full: &mut String,
+    delta: &str,
+) {
+    if delta.is_empty() {
+        return;
+    }
+
+    let chunks = split_stream_chunks(delta);
+    let multi_chunk = chunks.len() > 1;
+    for chunk in chunks {
+        full.push_str(chunk);
+        let _ = app.emit(
+            event_name,
+            serde_json::json!({
+              "imageId": image_id,
+              "kind": kind,
+              "delta": chunk
+            }),
+        );
+        if multi_chunk {
+            tokio::time::sleep(Duration::from_millis(STREAM_FALLBACK_CHUNK_DELAY_MS)).await;
+        } else {
+            tokio::task::yield_now().await;
+        }
+    }
+}
+
+async fn emit_responses_reasoning_delta(
+    app: &AppHandle,
+    event_name: &str,
+    image_id: &str,
+    kind: &str,
+    reasoning_full: &mut String,
+    delta: &str,
+) {
+    if delta.is_empty() {
+        return;
+    }
+
+    let chunks = split_stream_chunks(delta);
+    let multi_chunk = chunks.len() > 1;
+    for chunk in chunks {
+        reasoning_full.push_str(chunk);
+        let _ = app.emit(
+            event_name,
+            serde_json::json!({
+              "imageId": image_id,
+              "kind": kind,
+              "delta": "",
+              "reasoningDelta": chunk,
+            }),
+        );
+        if multi_chunk {
+            tokio::time::sleep(Duration::from_millis(STREAM_FALLBACK_CHUNK_DELAY_MS)).await;
+        } else {
+            tokio::task::yield_now().await;
+        }
+    }
+}
+
 /// 通用流式 chat 调用：发送 body（model 在外层注入）→ 解析 SSE → 通过 stream_vision_response emit。
 /// 复用 explain_stream_generation 作取消代号（lens-stream / lens-translate-stream 都共用）。
 #[allow(clippy::too_many_arguments)]
@@ -2592,6 +2953,8 @@ pub async fn stream_chat_call(
     image_id: &str,
     kind: &str,
     event_name: &str,
+    thinking_enabled: bool,
+    thinking_effort: &str,
 ) -> Result<String, String> {
     if provider.base_url == APPLE_INTELLIGENCE_BASE_URL {
         let _ = (
@@ -2603,6 +2966,8 @@ pub async fn stream_chat_call(
             image_id,
             kind,
             event_name,
+            thinking_enabled,
+            thinking_effort,
         );
         return Err("Apple Intelligence 暂不支持图像输入,请为截图翻译配置云端 provider".into());
     }
@@ -2618,9 +2983,21 @@ pub async fn stream_chat_call(
           "model": model,
           "input": input,
           "stream": true,
-          "max_output_tokens": response_max_output_tokens_from_body(&body, 2000)
+          "stream_options": { "include_obfuscation": false },
+          "max_output_tokens": responses_max_output_tokens(
+              response_max_output_tokens_from_body(&body, 2000),
+              thinking_enabled,
+              thinking_effort
+          )
         });
         apply_openai_web_search(&mut responses_body, true);
+        apply_responses_reasoning(
+            &mut responses_body,
+            provider,
+            model,
+            thinking_enabled,
+            thinking_effort,
+        );
 
         let url = responses_api_url(&provider.base_url);
         let response = send_with_failover(
@@ -2630,12 +3007,14 @@ pub async fn stream_chat_call(
             &provider.id,
             &provider.api_keys,
             |key| {
-                state
-                    .http
-                    .post(url.clone())
-                    .bearer_auth(key)
-                    .json(&responses_body)
-                    .send()
+                configure_sse_request(
+                    state
+                        .http
+                        .post(url.clone())
+                        .bearer_auth(key)
+                        .json(&responses_body),
+                )
+                .send()
             },
         )
         .await?;
@@ -2668,6 +3047,13 @@ pub async fn stream_chat_call(
     }
 
     let url = chat_completions_url(&provider.base_url);
+    apply_chat_reasoning(
+        &mut body,
+        provider,
+        model,
+        thinking_enabled,
+        thinking_effort,
+    );
 
     let response = send_with_failover(
         state,
@@ -2676,12 +3062,7 @@ pub async fn stream_chat_call(
         &provider.id,
         &provider.api_keys,
         |key| {
-            state
-                .http
-                .post(url.clone())
-                .bearer_auth(key)
-                .json(&body)
-                .send()
+            configure_sse_request(state.http.post(url.clone()).bearer_auth(key).json(&body)).send()
         },
     )
     .await?;
@@ -2710,7 +3091,7 @@ pub async fn stream_chat_call(
 }
 
 /// 流式解析 OpenAI Responses API 的 SSE 响应。
-/// 只向前端透传最终文本 delta，web_search 调用事件由后端静默处理。
+/// 透传最终文本 delta；Responses 推理摘要 / 工具状态作为 reasoningDelta 透给前端，避免长搜索时界面长时间无变化。
 pub async fn stream_responses_response(
     app: &AppHandle,
     mut response: reqwest::Response,
@@ -2722,6 +3103,9 @@ pub async fn stream_responses_response(
 ) -> Result<String, String> {
     let mut buffer = String::new();
     let mut full = String::new();
+    let mut reasoning_full = String::new();
+    let mut web_search_notice_emitted = false;
+    let mut sse_event_type = String::new();
 
     let emit_done = |reason: &str, full_text: &str| {
         let _ = app.emit(
@@ -2743,12 +3127,30 @@ pub async fn stream_responses_response(
             return Ok(full.trim().to_string());
         }
 
-        let chunk = match response.chunk().await {
-            Ok(Some(c)) => c,
-            Ok(None) => break,
-            Err(e) => {
-                emit_done("error", full.trim());
-                return Err(e.to_string());
+        let chunk = loop {
+            if generation_atom.load(Ordering::SeqCst) != my_generation {
+                emit_done("cancelled", full.trim());
+                return Ok(full.trim().to_string());
+            }
+
+            tokio::select! {
+                result = response.chunk() => {
+                    match result {
+                        Ok(Some(c)) => break c,
+                        Ok(None) => {
+                            emit_done("done", full.trim());
+                            return Ok(full.trim().to_string());
+                        }
+                        Err(e) => {
+                            emit_done("error", full.trim());
+                            return Err(format!(
+                                "Responses stream read body: {}",
+                                reqwest_error_details(&e)
+                            ));
+                        }
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_millis(STREAM_CANCEL_POLL_MS)) => {}
             }
         };
 
@@ -2758,6 +3160,14 @@ pub async fn stream_responses_response(
         while let Some(pos) = buffer.find('\n') {
             let line: String = buffer.drain(..=pos).collect();
             let line = line.trim();
+            if line.is_empty() {
+                sse_event_type.clear();
+                continue;
+            }
+            if let Some(event) = line.strip_prefix("event:") {
+                sse_event_type = event.trim().to_string();
+                continue;
+            }
             if !line.starts_with("data:") {
                 continue;
             }
@@ -2774,44 +3184,117 @@ pub async fn stream_responses_response(
                 Ok(val) => val,
                 Err(_) => continue,
             };
-            let event_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let event_type_owned = value
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or(sse_event_type.as_str())
+                .to_string();
+            sse_event_type.clear();
+            let event_type = event_type_owned.as_str();
+
+            if !web_search_notice_emitted {
+                let item_type = value
+                    .get("item")
+                    .and_then(|item| item.get("type"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if event_type.contains("web_search") || item_type.contains("web_search") {
+                    web_search_notice_emitted = true;
+                    emit_responses_reasoning_delta(
+                        app,
+                        event_name,
+                        image_id,
+                        kind,
+                        &mut reasoning_full,
+                        "正在联网搜索...\n",
+                    )
+                    .await;
+                }
+            }
 
             match event_type {
-                "response.output_text.delta" => {
-                    let delta = value
-                        .get("delta")
-                        .and_then(|v| v.as_str())
-                        .filter(|s| !s.is_empty());
-                    if let Some(delta) = delta {
-                        full.push_str(delta);
-                        let _ = app.emit(
+                event if event.contains("reasoning") && event.ends_with(".delta") => {
+                    if let Some(delta) =
+                        response_stream_delta_text(&value).filter(|s| !s.is_empty())
+                    {
+                        emit_responses_reasoning_delta(
+                            app,
                             event_name,
-                            serde_json::json!({
-                              "imageId": image_id,
-                              "kind": kind,
-                              "delta": delta
-                            }),
-                        );
+                            image_id,
+                            kind,
+                            &mut reasoning_full,
+                            &delta,
+                        )
+                        .await;
+                    }
+                }
+                event if event.contains("reasoning") && event.ends_with(".done") => {
+                    if let Some(text) = response_stream_done_text(&value) {
+                        let delta = stream_text_suffix(&reasoning_full, &text);
+                        emit_responses_reasoning_delta(
+                            app,
+                            event_name,
+                            image_id,
+                            kind,
+                            &mut reasoning_full,
+                            &delta,
+                        )
+                        .await;
+                    }
+                }
+                "response.output_text.delta" | "response.text.delta" => {
+                    if let Some(delta) =
+                        response_stream_delta_text(&value).filter(|s| !s.is_empty())
+                    {
+                        emit_responses_text_delta(
+                            app, event_name, image_id, kind, &mut full, &delta,
+                        )
+                        .await;
+                    }
+                }
+                "response.output_text.done" | "response.text.done" => {
+                    if let Some(text) = response_stream_done_text(&value) {
+                        let delta = stream_text_suffix(&full, &text);
+                        emit_responses_text_delta(
+                            app, event_name, image_id, kind, &mut full, &delta,
+                        )
+                        .await;
+                    }
+                }
+                "response.content_part.done" | "response.output_item.done" => {
+                    if let Some(text) = response_stream_done_text(&value) {
+                        let delta = stream_text_suffix(&full, &text);
+                        emit_responses_text_delta(
+                            app, event_name, image_id, kind, &mut full, &delta,
+                        )
+                        .await;
                     }
                 }
                 "response.completed" => {
+                    if let Some(reason) = response_incomplete_reason(&value) {
+                        emit_done("error", full.trim());
+                        return Err(format!(
+                            "Responses stream incomplete: {reason}. 当前思考/搜索可能耗尽了输出 token，请降低思考强度或稍后重试。"
+                        ));
+                    }
                     if full.trim().is_empty() {
                         if let Some(text) = value.get("response").and_then(response_output_text) {
-                            full.push_str(&text);
-                            if !text.is_empty() {
-                                let _ = app.emit(
-                                    event_name,
-                                    serde_json::json!({
-                                      "imageId": image_id,
-                                      "kind": kind,
-                                      "delta": text
-                                    }),
-                                );
-                            }
+                            emit_responses_text_delta(
+                                app, event_name, image_id, kind, &mut full, &text,
+                            )
+                            .await;
                         }
                     }
                     emit_done("done", full.trim());
                     return Ok(full.trim().to_string());
+                }
+                "response.incomplete" => {
+                    let reason =
+                        response_incomplete_reason(&value).unwrap_or_else(|| "unknown".to_string());
+                    emit_done("error", full.trim());
+                    return Err(format!(
+                        "Responses stream incomplete: {reason}. 当前思考/搜索可能耗尽了输出 token，请降低思考强度或稍后重试。"
+                    ));
                 }
                 "response.failed" | "error" => {
                     let message = responses_stream_error(&value);
@@ -2822,9 +3305,6 @@ pub async fn stream_responses_response(
             }
         }
     }
-
-    emit_done("done", full.trim());
-    Ok(full.trim().to_string())
 }
 
 /// 流式解析视觉 API 的 SSE 响应
@@ -2867,7 +3347,7 @@ pub async fn stream_vision_response(
             Ok(None) => break,
             Err(e) => {
                 emit_done("error", full.trim());
-                return Err(e.to_string());
+                return Err(format!("Stream read body: {}", reqwest_error_details(&e)));
             }
         };
 

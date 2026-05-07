@@ -265,6 +265,9 @@ pub struct ScreenshotTranslationConfig {
     /// 是否启用思考模式（OCR 模型 + 翻译模型）。默认 false：截图翻译追求快，思考通常没必要。
     #[serde(default = "default_false")]
     pub thinking_enabled: bool,
+    /// 思考强度：low / medium / high / xhigh。仅 thinking_enabled=true 时生效。
+    #[serde(default = "default_thinking_effort")]
+    pub thinking_effort: String,
     /// 是否流式输出 OCR + 翻译。默认 true：用户看着字逐步出现的体感比等"加载完"更顺。
     #[serde(default = "default_true")]
     pub stream_enabled: bool,
@@ -305,6 +308,7 @@ impl Default for ScreenshotTranslationConfig {
             caiyun_translate: CaiyunTranslateConfig::default(),
             direct_translate: false,
             thinking_enabled: false,
+            thinking_effort: default_thinking_effort(),
             stream_enabled: true,
             keep_fullscreen_after_capture: true,
             use_system_ocr: false,
@@ -351,6 +355,12 @@ pub struct LensConfig {
     /// false 时会向请求 body 注入各家厂商关闭思考的字段并集（不认识的会被 provider 忽略）。
     #[serde(default = "default_true")]
     pub thinking_enabled: bool,
+    /// 思考强度：low / medium / high / xhigh。仅 thinking_enabled=true 时生效。
+    #[serde(default = "default_thinking_effort")]
+    pub thinking_effort: String,
+    /// 是否为 Responses API 添加联网搜索 tools。默认 true。
+    #[serde(default = "default_true")]
+    pub web_search_enabled: bool,
     /// 自定义 system prompt。空字符串使用 default_system_prompt 模板。
     #[serde(default)]
     pub system_prompt: String,
@@ -379,10 +389,50 @@ impl Default for LensConfig {
             default_language: String::new(),
             stream_enabled: true,
             thinking_enabled: true,
+            thinking_effort: default_thinking_effort(),
+            web_search_enabled: true,
             system_prompt: String::new(),
             question_prompt: String::new(),
             message_order: "asc".to_string(),
             keep_fullscreen_after_capture: true,
+        }
+    }
+}
+
+/**
+ * 提示词优化器配置
+ */
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PromptOptimizerConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_prompt_optimizer_hotkey")]
+    pub hotkey: String,
+    /// provider/model 留空时 fallback 到 translator_provider_id / translator_model
+    #[serde(default)]
+    pub provider_id: String,
+    #[serde(default)]
+    pub model: String,
+    /// 响应语言（"zh"/"zh-Hant"/"en"）。空字符串表示跟随 settings.target_lang。
+    #[serde(default)]
+    pub default_language: String,
+    #[serde(default)]
+    pub system_prompt: String,
+    #[serde(default)]
+    pub optimize_prompt: String,
+}
+
+impl Default for PromptOptimizerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            hotkey: default_prompt_optimizer_hotkey(),
+            provider_id: String::new(),
+            model: String::new(),
+            default_language: String::new(),
+            system_prompt: String::new(),
+            optimize_prompt: String::new(),
         }
     }
 }
@@ -417,6 +467,8 @@ pub struct Settings {
     pub screenshot_translation: ScreenshotTranslationConfig,
     #[serde(default, alias = "cowork")]
     pub lens: LensConfig,
+    #[serde(default)]
+    pub prompt_optimizer: PromptOptimizerConfig,
     #[serde(default = "default_settings_language")]
     pub settings_language: Option<String>,
     #[serde(default = "default_retry_enabled")]
@@ -466,6 +518,7 @@ impl Default for Settings {
             providers: vec![],
             screenshot_translation: ScreenshotTranslationConfig::default(),
             lens: LensConfig::default(),
+            prompt_optimizer: PromptOptimizerConfig::default(),
             settings_language: Some("zh".to_string()),
             retry_enabled: default_retry_enabled(),
             retry_attempts: default_retry_attempts(),
@@ -636,6 +689,9 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
         .app_key
         .trim()
         .to_string();
+    settings.screenshot_translation.thinking_effort =
+        normalize_thinking_effort(&settings.screenshot_translation.thinking_effort);
+    settings.lens.thinking_effort = normalize_thinking_effort(&settings.lens.thinking_effort);
     settings.screenshot_translation.tencent_translate.secret_id = settings
         .screenshot_translation
         .tencent_translate
@@ -667,6 +723,7 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
         settings.translator_provider_id.clear();
         settings.screenshot_translation.provider_id.clear();
         settings.lens.provider_id.clear();
+        settings.prompt_optimizer.provider_id.clear();
     } else {
         if !provider_exists(&settings.translator_provider_id) {
             let first = &settings.providers[0];
@@ -699,6 +756,12 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
         if !settings.lens.provider_id.is_empty() && !provider_exists(&settings.lens.provider_id) {
             settings.lens.provider_id.clear();
             settings.lens.model.clear();
+        }
+        if !settings.prompt_optimizer.provider_id.is_empty()
+            && !provider_exists(&settings.prompt_optimizer.provider_id)
+        {
+            settings.prompt_optimizer.provider_id.clear();
+            settings.prompt_optimizer.model.clear();
         }
     }
 
@@ -766,6 +829,17 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
             {
                 provider.enabled_models.push(settings.lens.model.clone());
             }
+            if !settings.prompt_optimizer.provider_id.is_empty()
+                && settings.prompt_optimizer.provider_id == provider.id
+                && !settings.prompt_optimizer.model.is_empty()
+                && !provider
+                    .enabled_models
+                    .contains(&settings.prompt_optimizer.model)
+            {
+                provider
+                    .enabled_models
+                    .push(settings.prompt_optimizer.model.clone());
+            }
             // 如果仍然为空，添加默认模型
             if provider.enabled_models.is_empty() {
                 provider.enabled_models.push("gpt-4o".to_string());
@@ -804,6 +878,15 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
         {
             settings.lens.model = provider.enabled_models[0].clone();
         }
+        if !settings.prompt_optimizer.provider_id.is_empty()
+            && settings.prompt_optimizer.provider_id == provider.id
+            && !settings.prompt_optimizer.model.is_empty()
+            && !provider
+                .enabled_models
+                .contains(&settings.prompt_optimizer.model)
+        {
+            settings.prompt_optimizer.model = provider.enabled_models[0].clone();
+        }
     }
 
     if !settings
@@ -823,6 +906,7 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
     settings.screenshot_translation.hotkey =
         normalize_hotkey(&settings.screenshot_translation.hotkey);
     settings.lens.hotkey = normalize_hotkey(&settings.lens.hotkey);
+    settings.prompt_optimizer.hotkey = normalize_hotkey(&settings.prompt_optimizer.hotkey);
 
     // 旧版默认快捷键迁移到新的默认键；用户自定义快捷键不受影响。
     if settings.hotkey == "CommandOrControl+Alt+T" {
@@ -844,6 +928,15 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
         normalize_optional_prompt(settings.screenshot_translation.ocr_prompt.take());
     settings.screenshot_translation.prompt =
         normalize_optional_prompt(settings.screenshot_translation.prompt.take());
+    settings.prompt_optimizer.system_prompt =
+        settings.prompt_optimizer.system_prompt.trim().to_string();
+    settings.prompt_optimizer.optimize_prompt =
+        settings.prompt_optimizer.optimize_prompt.trim().to_string();
+    settings.prompt_optimizer.default_language = settings
+        .prompt_optimizer
+        .default_language
+        .trim()
+        .to_string();
 
     // 5. 确保必要字段不为空
     if settings.hotkey.is_empty() {
@@ -854,6 +947,9 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
     }
     if settings.lens.hotkey.is_empty() {
         settings.lens.hotkey = default_lens_hotkey();
+    }
+    if settings.prompt_optimizer.hotkey.is_empty() {
+        settings.prompt_optimizer.hotkey = default_prompt_optimizer_hotkey();
     }
     if settings.lens.message_order != "asc" && settings.lens.message_order != "desc" {
         settings.lens.message_order = "asc".to_string();
@@ -1047,6 +1143,19 @@ fn default_screenshot_translation_method() -> String {
     "ai".to_string()
 }
 
+fn default_thinking_effort() -> String {
+    "medium".to_string()
+}
+
+fn normalize_thinking_effort(value: &str) -> String {
+    match value.trim().to_lowercase().as_str() {
+        "low" => "low".to_string(),
+        "high" => "high".to_string(),
+        "xhigh" => "xhigh".to_string(),
+        _ => default_thinking_effort(),
+    }
+}
+
 fn default_baidu_ocr_language() -> String {
     "CHN_ENG".to_string()
 }
@@ -1057,6 +1166,10 @@ fn default_baidu_translate_source() -> String {
 
 fn default_lens_hotkey() -> String {
     "F3".to_string()
+}
+
+fn default_prompt_optimizer_hotkey() -> String {
+    "Control+Alt+P".to_string()
 }
 
 fn default_theme() -> String {

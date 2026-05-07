@@ -117,6 +117,8 @@ export type Settings = {
     directTranslate?: boolean
     /** 思考模式开关（默认 false）。OCR 模型 + 翻译模型都会注入对应字段 */
     thinkingEnabled?: boolean
+    /** 思考强度（默认 medium）。仅 thinkingEnabled=true 时生效 */
+    thinkingEffort?: 'low' | 'medium' | 'high' | 'xhigh'
     /** 流式输出开关（默认 true）。OCR + 翻译两步都用 SSE，token 逐字到达 */
     streamEnabled?: boolean
     /** 截图后是否保持全屏覆盖（默认 true）。false 时截图后窗口缩小为浮动 */
@@ -137,12 +139,25 @@ export type Settings = {
     streamEnabled?: boolean
     /** 思考模式开关（默认 true）。false 时 body 注入各厂商关闭思考的字段并集 */
     thinkingEnabled?: boolean
+    /** 思考强度（默认 medium）。仅 thinkingEnabled=true 时生效 */
+    thinkingEffort?: 'low' | 'medium' | 'high' | 'xhigh'
+    /** 联网搜索开关（默认 true）。Responses API 下会添加 web_search tools */
+    webSearchEnabled?: boolean
     systemPrompt?: string
     questionPrompt?: string
     /** 消息排序：'asc' 老到新（默认），'desc' 新到老 */
     messageOrder?: 'asc' | 'desc'
     /** 截图后是否保持全屏覆盖（默认 true）。false 时截图后窗口缩小为浮动 */
     keepFullscreenAfterCapture?: boolean
+  }
+  promptOptimizer: {
+    enabled: boolean
+    hotkey: string
+    providerId?: string
+    model?: string
+    defaultLanguage?: string
+    systemPrompt?: string
+    optimizePrompt?: string
   }
   settingsLanguage?: 'zh' | 'en'
   /** 启动时静默检查 GH Releases 是否有新版（默认 false） */
@@ -175,6 +190,10 @@ export type DefaultPromptTemplates = {
   lensPrompts: {
     zh: { system: string; question: string }
     en: { system: string; question: string }
+  }
+  promptOptimizerPrompts?: {
+    zh: { system: string; optimize: string }
+    en: { system: string; optimize: string }
   }
 }
 
@@ -225,6 +244,7 @@ export const api = {
 
   // 文本翻译
   translateText: (text: string) => invoke<string>('translate_text', { text }),
+  optimizePrompt: (text: string) => invoke<string>('optimize_prompt', { text }),
   commitTranslation: (text: string) => invoke<void>('commit_translation', { text }),
   takeTranslatorSelection: () => invoke<string>('take_translator_selection'),
 

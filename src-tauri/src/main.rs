@@ -46,8 +46,10 @@ use api::{
     send_with_retry, stream_chat_call, ProviderConnectionInput,
 };
 use prompts::{
-    build_screenshot_translation_prompt, build_translation_prompt, DEFAULT_SCREENSHOT_OCR_PROMPT,
-    DEFAULT_SCREENSHOT_TRANSLATION_TEMPLATE, DEFAULT_TRANSLATION_TEMPLATE,
+    build_prompt_optimizer_prompt, build_screenshot_translation_prompt, build_translation_prompt,
+    default_prompt_optimizer_system_prompt, default_prompt_optimizer_template,
+    DEFAULT_SCREENSHOT_OCR_PROMPT, DEFAULT_SCREENSHOT_TRANSLATION_TEMPLATE,
+    DEFAULT_TRANSLATION_TEMPLATE,
 };
 use screenshot::{cleanup_orphan_temp_files, cleanup_temp_file};
 use settings::{
@@ -103,6 +105,16 @@ fn get_default_prompt_templates() -> serde_json::Value {
         "en": {
           "system": default_system_prompt("en", true),
           "question": default_question_prompt("en", true)
+        }
+      },
+      "promptOptimizerPrompts": {
+        "zh": {
+          "system": default_prompt_optimizer_system_prompt("zh"),
+          "optimize": default_prompt_optimizer_template("zh")
+        },
+        "en": {
+          "system": default_prompt_optimizer_system_prompt("en"),
+          "optimize": default_prompt_optimizer_template("en")
         }
       }
     })
@@ -205,7 +217,55 @@ async fn translate_text(state: State<'_, AppState>, text: String) -> Result<Stri
     let (provider, model) = screenshot_translate_model_pair(&settings)?;
 
     // 主翻译路径默认关思考：reasoning 模型对单句翻译几乎无质量收益但显著拖慢；非 reasoning 模型该字段被忽略
-    call_openai_text(&state, provider, &model, prompt, retry_attempts, false).await
+    call_openai_text(
+        &state,
+        provider,
+        &model,
+        prompt,
+        retry_attempts,
+        false,
+        "medium",
+    )
+    .await
+}
+
+/// 优化提示词：根据提示词优化器设置选择 provider/model，并输出可复制的优化建议。
+#[tauri::command]
+async fn optimize_prompt(state: State<'_, AppState>, text: String) -> Result<String, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(String::new());
+    }
+
+    let settings = state.settings_read().clone();
+    let language = if !settings.prompt_optimizer.default_language.is_empty() {
+        settings.prompt_optimizer.default_language.clone()
+    } else if settings.target_lang.starts_with("zh") || settings.target_lang == "en" {
+        settings.target_lang.clone()
+    } else {
+        "zh".to_string()
+    };
+    let lang_name = language_name(&language).to_string();
+    let retry_attempts = effective_retry_attempts(&settings);
+    let (provider, model) = prompt_optimizer_model_pair(&settings)?;
+    let prompt = build_prompt_optimizer_prompt(
+        trimmed,
+        &lang_name,
+        &language,
+        Some(&settings.prompt_optimizer.system_prompt),
+        Some(&settings.prompt_optimizer.optimize_prompt),
+    );
+
+    call_openai_text(
+        &state,
+        provider,
+        &model,
+        prompt,
+        retry_attempts,
+        false,
+        "medium",
+    )
+    .await
 }
 
 /// 提交翻译结果
@@ -1269,6 +1329,8 @@ async fn lens_ask(
     };
     let stream_enabled = settings.lens.stream_enabled;
     let thinking_enabled = settings.lens.thinking_enabled;
+    let thinking_effort = settings.lens.thinking_effort.clone();
+    let web_search_enabled = settings.lens.web_search_enabled;
 
     let provider_override = if !settings.lens.provider_id.is_empty() {
         Some(settings.lens.provider_id.clone())
@@ -1337,6 +1399,8 @@ async fn lens_ask(
         model_override.as_deref(),
         system_prompt_override.as_deref(),
         thinking_enabled,
+        &thinking_effort,
+        web_search_enabled,
     )
     .await
     {
@@ -1406,6 +1470,28 @@ fn screenshot_translate_model_pair(
         provider_id,
         model,
         "Translation provider not found",
+    )
+}
+
+fn prompt_optimizer_model_pair(
+    settings: &Settings,
+) -> Result<(&settings::ModelProvider, String), String> {
+    let po = &settings.prompt_optimizer;
+    let provider_id = if po.provider_id.trim().is_empty() {
+        settings.translator_provider_id.as_str()
+    } else {
+        po.provider_id.as_str()
+    };
+    let model = if po.model.trim().is_empty() {
+        settings.translator_model.as_str()
+    } else {
+        po.model.as_str()
+    };
+    screenshot_model_pair(
+        settings,
+        provider_id,
+        model,
+        "Prompt optimizer provider not found",
     )
 }
 
@@ -2026,6 +2112,7 @@ async fn recognize_screenshot_text(
                     .unwrap_or(DEFAULT_SCREENSHOT_OCR_PROMPT),
                 retry_attempts,
                 thinking_enabled,
+                &settings.screenshot_translation.thinking_effort,
             )
             .await
         }
@@ -2138,14 +2225,11 @@ async fn translate_screenshot_text(
             return Ok(accumulated);
         }
 
-        let mut body = serde_json::json!({
+        let body = serde_json::json!({
           "messages": [{ "role": "user", "content": translate_prompt }],
           "stream": true,
           "temperature": 0.2,
         });
-        if !thinking_enabled {
-            body["thinking"] = serde_json::json!({ "type": "disabled" });
-        }
         return stream_chat_call(
             app,
             state,
@@ -2156,6 +2240,8 @@ async fn translate_screenshot_text(
             image_id,
             "translated",
             "lens-translate-stream",
+            thinking_enabled,
+            &settings.screenshot_translation.thinking_effort,
         )
         .await;
     }
@@ -2173,6 +2259,7 @@ async fn translate_screenshot_text(
             translate_prompt,
             retry_attempts,
             thinking_enabled,
+            &settings.screenshot_translation.thinking_effort,
         )
         .await?
     };
@@ -2267,6 +2354,7 @@ async fn translate_screenshot_text_plain(
             translate_prompt,
             retry_attempts,
             thinking_enabled,
+            &settings.screenshot_translation.thinking_effort,
         )
         .await
     }
@@ -2866,6 +2954,7 @@ enum HotkeyAction {
     Translator,
     ScreenshotTranslation,
     Lens,
+    PromptOptimizer,
 }
 
 impl HotkeyAction {
@@ -2874,6 +2963,7 @@ impl HotkeyAction {
             Self::Translator => "translator",
             Self::ScreenshotTranslation => "screenshot_translation",
             Self::Lens => "lens",
+            Self::PromptOptimizer => "prompt_optimizer",
         }
     }
 }
@@ -2920,6 +3010,7 @@ fn trigger_hotkey_action(app: &AppHandle, action: HotkeyAction) {
                 }
             });
         }
+        HotkeyAction::PromptOptimizer => toggle_prompt_optimizer_window(app),
     }
 }
 
@@ -3077,6 +3168,32 @@ fn register_hotkeys(app: &AppHandle) -> Result<(), String> {
         }
     }
 
+    if settings.prompt_optimizer.enabled {
+        let hotkey = settings.prompt_optimizer.hotkey.trim().to_string();
+        if hotkey.is_empty() {
+            errors.push("Prompt optimizer hotkey is empty".to_string());
+        } else {
+            let hotkey_key = hotkey.to_lowercase();
+            if !registered.insert(hotkey_key) {
+                errors.push(format!(
+                    "Duplicate hotkey \"{hotkey}\" for prompt optimizer"
+                ));
+            } else if let Err(err) =
+                shortcut_manager.on_shortcut(hotkey.as_str(), move |app, _shortcut, event| {
+                    if event.state == ShortcutState::Pressed {
+                        trigger_hotkey_action(app, HotkeyAction::PromptOptimizer);
+                    }
+                })
+            {
+                errors.push(format_hotkey_error(
+                    "prompt optimizer",
+                    &hotkey,
+                    &err.to_string(),
+                ));
+            }
+        }
+    }
+
     if errors.is_empty() {
         Ok(())
     } else {
@@ -3115,11 +3232,11 @@ fn clamp_axis_to_monitor(start: i32, min: i32, max: i32, size: i32) -> i32 {
 fn translator_popup_position(
     app: &AppHandle,
     window: &WebviewWindow,
+    fallback_logical_w: f64,
+    fallback_logical_h: f64,
 ) -> Option<tauri::PhysicalPosition<i32>> {
     const OFFSET: f64 = 10.0;
     const EDGE_MARGIN: i32 = 8;
-    const FALLBACK_LOGICAL_W: f64 = 600.0;
-    const FALLBACK_LOGICAL_H: f64 = 420.0;
 
     let cursor = get_mouse_position(app)?;
     let monitors = app.available_monitors().ok()?;
@@ -3138,11 +3255,11 @@ fn translator_popup_position(
     let size = window.outer_size().ok();
     let width = size
         .map(|s| s.width as i32)
-        .unwrap_or_else(|| (FALLBACK_LOGICAL_W * scale).round() as i32)
+        .unwrap_or_else(|| (fallback_logical_w * scale).round() as i32)
         .max(1);
     let height = size
         .map(|s| s.height as i32)
-        .unwrap_or_else(|| (FALLBACK_LOGICAL_H * scale).round() as i32)
+        .unwrap_or_else(|| (fallback_logical_h * scale).round() as i32)
         .max(1);
     let left = mp.x + EDGE_MARGIN;
     let top = mp.y + EDGE_MARGIN;
@@ -3323,7 +3440,7 @@ fn toggle_main_window_internal(app: &AppHandle, capture_selection: bool) {
     );
     let _ = window.set_size(tauri::LogicalSize::new(600.0, 420.0));
 
-    let pos = translator_popup_position(app, &window);
+    let pos = translator_popup_position(app, &window, 600.0, 420.0);
 
     #[cfg(target_os = "macos")]
     {
@@ -3362,6 +3479,59 @@ fn toggle_main_window_internal(app: &AppHandle, capture_selection: bool) {
             }
         } else {
             eprintln!("Failed to get mouse position");
+        }
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+fn toggle_prompt_optimizer_window(app: &AppHandle) {
+    let window = match ensure_main_window(app) {
+        Ok(window) => window,
+        Err(err) => {
+            eprintln!("Failed to ensure main window: {}", err);
+            return;
+        }
+    };
+
+    let _ = window.set_always_on_top(true);
+    let _ = window.set_size(tauri::LogicalSize::new(680.0, 540.0));
+    let _ = window.eval(
+        "window.location.hash = '#prompt-optimizer'; window.dispatchEvent(new HashChangeEvent('hashchange'));",
+    );
+    let pos = translator_popup_position(app, &window, 680.0, 540.0);
+
+    #[cfg(target_os = "macos")]
+    {
+        let window_for_task = window.clone();
+        let _ = window.run_on_main_thread(move || {
+            if let Some(pos) = pos {
+                if let Err(e) = window_for_task.set_position(pos) {
+                    eprintln!("Failed to set prompt optimizer window position: {}", e);
+                }
+            }
+            let _ = window_for_task.show();
+            let _ = window_for_task.set_focus();
+        });
+        return;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(pos) = pos {
+            if let Err(e) = window.set_position(pos) {
+                eprintln!("Failed to set prompt optimizer window position: {}", e);
+            }
+        }
+        windows_show_and_focus(&window, true);
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        if let Some(pos) = pos {
+            if let Err(e) = window.set_position(pos) {
+                eprintln!("Failed to set prompt optimizer window position: {}", e);
+            }
         }
         let _ = window.show();
         let _ = window.set_focus();
@@ -3778,17 +3948,27 @@ fn tray_labels(
     &'static str,
     &'static str,
     &'static str,
+    &'static str,
 ) {
     match lang {
         "en" => (
             "Translate",
             "Lens",
             "OCR",
+            "Prompt Optimizer",
             "Restart as Administrator",
             "Settings",
             "Quit",
         ),
-        _ => ("翻译", "Lens", "OCR", "管理员身份重启", "设置", "退出"),
+        _ => (
+            "翻译",
+            "Lens",
+            "OCR",
+            "提示词优化",
+            "管理员身份重启",
+            "设置",
+            "退出",
+        ),
     }
 }
 
@@ -3800,11 +3980,19 @@ fn build_tray_menu(
     use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 
     let lang = settings.settings_language.as_deref().unwrap_or("zh");
-    let (translate_label, lens_label, ocr_label, restart_admin_label, settings_label, quit_label) =
-        tray_labels(lang);
+    let (
+        translate_label,
+        lens_label,
+        ocr_label,
+        prompt_optimizer_label,
+        restart_admin_label,
+        settings_label,
+        quit_label,
+    ) = tray_labels(lang);
     let translator_hotkey = settings.hotkey.trim();
     let lens_hotkey = settings.lens.hotkey.trim();
     let ocr_hotkey = settings.screenshot_translation.hotkey.trim();
+    let prompt_optimizer_hotkey = settings.prompt_optimizer.hotkey.trim();
 
     let translate = MenuItem::with_id(
         app,
@@ -3830,6 +4018,14 @@ fn build_tray_menu(
         (!ocr_hotkey.is_empty()).then_some(ocr_hotkey),
     )
     .map_err(|e| e.to_string())?;
+    let prompt_optimizer = MenuItem::with_id(
+        app,
+        "prompt_optimizer",
+        prompt_optimizer_label,
+        settings.prompt_optimizer.enabled,
+        (!prompt_optimizer_hotkey.is_empty()).then_some(prompt_optimizer_hotkey),
+    )
+    .map_err(|e| e.to_string())?;
     let separator = PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?;
     let settings = MenuItem::with_id(app, "settings", settings_label, true, None::<&str>)
         .map_err(|e| e.to_string())?;
@@ -3849,6 +4045,7 @@ fn build_tray_menu(
             &translate,
             &lens,
             &ocr,
+            &prompt_optimizer,
             &separator,
             &restart_admin,
             &settings,
@@ -3925,6 +4122,9 @@ fn setup_tray(app: &AppHandle) -> Result<(), String> {
                         eprintln!("Failed to open OCR from tray menu: {err}");
                     }
                 });
+            }
+            "prompt_optimizer" => {
+                toggle_prompt_optimizer_window(app);
             }
             "settings" => {
                 if let Err(err) = open_settings_window(app) {
@@ -4054,6 +4254,7 @@ fn main() {
             get_default_prompt_templates,
             save_settings,
             translate_text,
+            optimize_prompt,
             commit_translation,
             open_external,
             explain_read_image,

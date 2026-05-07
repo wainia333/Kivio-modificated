@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type AnimationEvent, type ClipboardEvent } from 'react'
+import { isValidElement, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type AnimationEvent, type ClipboardEvent, type ComponentPropsWithoutRef, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
 import { flushSync } from 'react-dom'
-import { Loader2, Copy, Check, Square, Image as ImageIcon, ArrowUp, History as HistoryIcon, ChevronDown, Brain, MousePointer2, Play, X } from 'lucide-react'
+import { Loader2, Copy, Check, Square, Image as ImageIcon, ArrowUp, History as HistoryIcon, ChevronDown, Brain, MousePointer2, Play, X, Sparkles } from 'lucide-react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { api, type LensStreamPayload, type LensTranslateStreamPayload, type LensWindowInfo, type ExplainMessage, type Settings } from './api/tauri'
-import ReactMarkdown from 'react-markdown'
+import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
@@ -287,17 +287,192 @@ function ReadableMarkdownText({ text }: { text: string }) {
   const normalized = normalizeEnglishPunctuationSpacing(text).replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim()
   return (
     <div className={`lens-readable-text ${readableParagraphGapClass(text)} prose prose-sm dark:prose-invert max-w-none text-[13px] leading-[1.48] text-neutral-800 dark:text-neutral-200`}>
-      <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
+      <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} components={MARKDOWN_COMPONENTS}>
         {normalized}
       </ReactMarkdown>
     </div>
   )
 }
 
+function reactNodeToText(node: ReactNode): string {
+  if (typeof node === 'string' || typeof node === 'number') return String(node)
+  if (Array.isArray(node)) return node.map(reactNodeToText).join('')
+  if (isValidElement<{ children?: ReactNode }>(node)) return reactNodeToText(node.props.children)
+  return ''
+}
+
+function MarkdownCodeCopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false)
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => () => {
+    if (timerRef.current) clearTimeout(timerRef.current)
+  }, [])
+
+  const handleCopy = useCallback(async (event: ReactMouseEvent<HTMLButtonElement>) => {
+    event.preventDefault()
+    event.stopPropagation()
+    if (!text.trim()) return
+    const ok = await copyToClipboard(text)
+    if (!ok) return
+    setCopied(true)
+    if (timerRef.current) clearTimeout(timerRef.current)
+    timerRef.current = window.setTimeout(() => setCopied(false), 1400)
+  }, [text])
+
+  return (
+    <button
+      type="button"
+      onClick={handleCopy}
+      onMouseDown={(event) => event.stopPropagation()}
+      disabled={!text.trim()}
+      title={copied ? '已复制' : '复制代码'}
+      aria-label={copied ? '已复制' : '复制代码'}
+      className="absolute right-2 top-2 z-10 inline-flex h-7 w-7 items-center justify-center rounded-md bg-white/10 text-neutral-300 opacity-0 ring-1 ring-white/10 backdrop-blur transition hover:bg-white/15 hover:text-white disabled:cursor-not-allowed disabled:opacity-30 group-hover:opacity-100"
+    >
+      {copied ? <Check size={13} strokeWidth={2.2} /> : <Copy size={13} strokeWidth={2.1} />}
+    </button>
+  )
+}
+
+type MarkdownPreProps = ComponentPropsWithoutRef<'pre'> & { node?: unknown }
+
+function MarkdownPre(props: MarkdownPreProps) {
+  const { children, node, className, ...preProps } = props
+  void node
+  const text = useMemo(() => reactNodeToText(children).replace(/\n$/, ''), [children])
+
+  return (
+    <div className="not-prose group relative my-3 overflow-hidden rounded-xl border border-black/[0.08] bg-neutral-950 text-neutral-100 shadow-sm dark:border-white/[0.08]">
+      <MarkdownCodeCopyButton text={text} />
+      <pre
+        {...preProps}
+        className={`m-0 max-h-[360px] overflow-auto p-3.5 pr-12 text-[12px] leading-5 custom-scrollbar ${className ?? ''}`}
+      >
+        {children}
+      </pre>
+    </div>
+  )
+}
+
+const MARKDOWN_COMPONENTS: Components = {
+  pre: MarkdownPre,
+}
+
+function markdownFenceState(value: string): { inFence: boolean; displayMathOpen: boolean } {
+  let fence: '`' | '~' | null = null
+  let displayMathOpen = false
+
+  value.split('\n').forEach(line => {
+    const trimmed = line.trim()
+    const leading = line.trimStart()
+    const fenceMatch = leading.match(/^(```+|~~~+)/)
+    if (fenceMatch) {
+      const mark = fenceMatch[1][0] as '`' | '~'
+      if (!fence) fence = mark
+      else if (fence === mark) fence = null
+      return
+    }
+    if (fence) return
+
+    let idx = 0
+    while ((idx = trimmed.indexOf('$$', idx)) >= 0) {
+      if (idx === 0 || trimmed[idx - 1] !== '\\') displayMathOpen = !displayMathOpen
+      idx += 2
+    }
+  })
+
+  return { inFence: !!fence, displayMathOpen }
+}
+
+function isMarkdownBlockLine(line: string): boolean {
+  const trimmed = line.trim()
+  if (!trimmed) return false
+  return /^#{1,6}\s+/.test(trimmed)
+    || /^[-*+]\s+/.test(trimmed)
+    || /^\d+[.)]\s+/.test(trimmed)
+    || /^>\s?/.test(trimmed)
+    || /^(```+|~~~+)/.test(trimmed)
+    || /^-{3,}$/.test(trimmed)
+    || /^\|.+\|$/.test(trimmed)
+    || /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(trimmed)
+}
+
+function safeStreamingMarkdownBoundary(value: string): number {
+  const normalized = value.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+  let lastBoundary = 0
+  let lineStart = 0
+  let previousLine = ''
+
+  for (let i = 0; i < normalized.length; i++) {
+    if (normalized[i] !== '\n') continue
+    const line = normalized.slice(lineStart, i)
+    const nextLineStart = i + 1
+    const prefix = normalized.slice(0, nextLineStart)
+    const { inFence, displayMathOpen } = markdownFenceState(prefix)
+    if (!inFence && !displayMathOpen) {
+      const isBlankBoundary = !line.trim()
+      const isBlockBoundary = isMarkdownBlockLine(line) || isMarkdownBlockLine(previousLine)
+      const hasParagraphGap = normalized.slice(Math.max(0, i - 1), i + 1) === '\n\n'
+      if (isBlankBoundary || isBlockBoundary || hasParagraphGap) {
+        lastBoundary = nextLineStart
+      }
+    }
+    previousLine = line
+    lineStart = nextLineStart
+  }
+
+  return lastBoundary
+}
+
+function splitStreamingMarkdown(value: string): { stable: string; tail: string } {
+  const normalized = value.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+  const boundary = safeStreamingMarkdownBoundary(normalized)
+  if (boundary <= 0) return { stable: '', tail: normalized }
+  return {
+    stable: normalized.slice(0, boundary).trimEnd(),
+    tail: normalized.slice(boundary).replace(/^\n+/, ''),
+  }
+}
+
+const StableMarkdownText = memo(function StableMarkdownText({ text }: { text: string }) {
+  return (
+    <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} components={MARKDOWN_COMPONENTS}>
+      {text}
+    </ReactMarkdown>
+  )
+})
+
+function StreamingMarkdownText({ text, active }: { text: string; active: boolean }) {
+  const { stable, tail } = useMemo(
+    () => active ? splitStreamingMarkdown(text) : { stable: text, tail: '' },
+    [active, text],
+  )
+
+  if (!stable.trim()) {
+    return (
+      <div className="not-prose whitespace-pre-wrap break-words text-[13.5px] leading-7 text-neutral-800 dark:text-neutral-200">
+        {tail}
+      </div>
+    )
+  }
+
+  return (
+    <>
+      <StableMarkdownText text={stable} />
+      {tail && (
+        <div className="not-prose mt-2 whitespace-pre-wrap break-words text-[13.5px] leading-7 text-neutral-800 dark:text-neutral-200">
+          {tail}
+        </div>
+      )}
+    </>
+  )
+}
+
 function ReadonlyOcrMarkdownText({ text }: { text: string }) {
   return (
     <div className={`ocr-markdown lens-readable-text ${readableParagraphGapClass(text)} prose prose-sm dark:prose-invert max-w-none text-[13px] leading-[1.48] text-neutral-800 dark:text-neutral-200 select-text`}>
-      <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
+      <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} components={MARKDOWN_COMPONENTS}>
         {text}
       </ReactMarkdown>
     </div>
@@ -506,6 +681,48 @@ const SELECT_BAR_COLLAPSE_MS = 120
 const FLOATING_PADDING = 0
 const FLOATING_GAP = 8
 const HIT_REGION_MARGIN = 2
+const CHAT_AUTO_FOLLOW_THRESHOLD_PX = 48
+
+function isChatAtLiveEdge(el: HTMLDivElement, order: 'asc' | 'desc'): boolean {
+  if (order === 'desc') return el.scrollTop <= CHAT_AUTO_FOLLOW_THRESHOLD_PX
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= CHAT_AUTO_FOLLOW_THRESHOLD_PX
+}
+
+function scrollChatToLiveEdge(el: HTMLDivElement, order: 'asc' | 'desc') {
+  if (order === 'desc') el.scrollTop = 0
+  else el.scrollTop = el.scrollHeight
+}
+
+function stripMarkdownFence(value: string): string {
+  const trimmed = value.trim()
+  const match = trimmed.match(/^```[^\n]*\n([\s\S]*?)\n```$/)
+  return match ? match[1].trim() : trimmed
+}
+
+function extractOptimizedPromptForInput(value: string): string {
+  const text = value.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim()
+  if (!text) return ''
+
+  const lines = text.split('\n')
+  const start = lines.findIndex(line => {
+    const title = line.trim().replace(/^#{1,6}\s*/, '').replace(/[:：]\s*$/, '').trim()
+    return /^(优化后的提示词|Optimized Prompt)(\s*[:：].*)?$/i.test(title)
+  })
+  if (start < 0) return stripMarkdownFence(text)
+
+  const inline = lines[start]
+    .trim()
+    .replace(/^#{1,6}\s*/, '')
+    .replace(/^(优化后的提示词|Optimized Prompt)\s*[:：]?\s*/i, '')
+    .trim()
+  const section = inline ? [inline, ...lines.slice(start + 1)] : lines.slice(start + 1)
+  const end = section.findIndex(line => {
+    const title = line.trim().replace(/^#{1,6}\s*/, '').replace(/[:：]\s*$/, '').trim()
+    return /^(调整要点|Changes Made)$/i.test(title) || /^#{1,6}\s+/.test(line.trim())
+  })
+  const extracted = (end >= 0 ? section.slice(0, end) : section).join('\n').trim()
+  return stripMarkdownFence(extracted || text)
+}
 
 /** Canvas 缩放截图为小缩略图，避免历史记录把整张原图（几 MB）写进 localStorage */
 async function makeThumbnail(dataUrl: string, maxSize: number): Promise<string> {
@@ -901,6 +1118,7 @@ export default function Lens() {
   const [selectionText, setSelectionText] = useState('')
   const [messages, setMessages] = useState<ExplainMessage[]>([])
   const [streaming, setStreaming] = useState(false)
+  const [promptOptimizing, setPromptOptimizing] = useState(false)
   const [copiedTarget, setCopiedTarget] = useState<CopyTarget | null>(null)
   const [speechLoadingTarget, setSpeechLoadingTarget] = useState<SpeechTarget | null>(null)
   const [speakingTarget, setSpeakingTarget] = useState<SpeechTarget | null>(null)
@@ -976,6 +1194,7 @@ export default function Lens() {
   const [historyOpen, setHistoryOpen] = useState(false)
   const [hitRegionRect, setHitRegionRect] = useState<Rect | null>(null)
   const [nativeHitRegionActive, setNativeHitRegionActive] = useState(false)
+  const [panelDragActive, setPanelDragActive] = useState(false)
 
   const inputRef = useRef<HTMLInputElement>(null)
   const barPanelRef = useRef<HTMLDivElement>(null)
@@ -994,8 +1213,14 @@ export default function Lens() {
   const barFlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const focusReqIdRef = useRef(0)
   const prevStreamingRef = useRef(false)
+  const lensStreamFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lensStreamBufferRef = useRef({ content: '', reasoning: '' })
   const preparingSendRef = useRef(false)
+  const closingStreamRef = useRef(false)
   const closeResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const chatAutoFollowRef = useRef(true)
+  const promptOptimizeSeqRef = useRef(0)
+  const promptOptimizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // Stream 真实结束（成功 / 错误 / 用户主动取消）后才置 true，
   // 让历史持久化 effect 只在这一次 rerun 触发 push；restoreHistory / enterSelect / resetBeforeHide 防御性清零，
   // 避免恢复历史时 setMessages 触发 effect 把恢复的对话又当新条目写一遍历史。
@@ -1023,6 +1248,42 @@ export default function Lens() {
   translateOriginalRef.current = translateOriginal
   translateTextRef.current = translateText
 
+  const cancelPromptOptimization = useCallback(() => {
+    promptOptimizeSeqRef.current += 1
+    if (promptOptimizeTimerRef.current) {
+      clearTimeout(promptOptimizeTimerRef.current)
+      promptOptimizeTimerRef.current = null
+    }
+    setPromptOptimizing(false)
+  }, [])
+
+  const streamOptimizedPromptIntoInput = useCallback((text: string, seq: number) => {
+    if (promptOptimizeTimerRef.current) {
+      clearTimeout(promptOptimizeTimerRef.current)
+      promptOptimizeTimerRef.current = null
+    }
+
+    const chars = Array.from(text)
+    const chunkSize = Math.max(1, Math.ceil(chars.length / 120))
+    let cursor = 0
+    setInput('')
+
+    const tick = () => {
+      if (seq !== promptOptimizeSeqRef.current) return
+      cursor = Math.min(chars.length, cursor + chunkSize)
+      setInput(chars.slice(0, cursor).join(''))
+      if (cursor < chars.length) {
+        promptOptimizeTimerRef.current = window.setTimeout(tick, 14)
+        return
+      }
+      promptOptimizeTimerRef.current = null
+      setPromptOptimizing(false)
+      inputRef.current?.focus({ preventScroll: true })
+    }
+
+    tick()
+  }, [])
+
   const stopSpeechPlayback = useCallback(() => {
     speechSeqRef.current += 1
     const audio = speechAudioRef.current
@@ -1044,6 +1305,50 @@ export default function Lens() {
       console.error('[lens-floating] cursor passthrough failed:', err)
     })
   }, [])
+
+  const clearLensStreamFlushTimer = useCallback(() => {
+    if (lensStreamFlushTimerRef.current) {
+      clearTimeout(lensStreamFlushTimerRef.current)
+      lensStreamFlushTimerRef.current = null
+    }
+  }, [])
+
+  const flushLensStreamBuffer = useCallback((sync = false) => {
+    const pending = lensStreamBufferRef.current
+    if (!pending.content && !pending.reasoning) return
+    lensStreamBufferRef.current = { content: '', reasoning: '' }
+
+    const applyBufferedMessages = () => {
+      setMessages(prev => {
+        const last = prev[prev.length - 1]
+        if (!last || last.role !== 'assistant') return prev
+        return [
+          ...prev.slice(0, -1),
+          {
+            ...last,
+            content: last.content + pending.content,
+            reasoning: pending.reasoning ? (last.reasoning ?? '') + pending.reasoning : last.reasoning,
+          },
+        ]
+      })
+    }
+
+    if (sync) flushSync(applyBufferedMessages)
+    else applyBufferedMessages()
+  }, [])
+
+  const resetLensStreamBuffer = useCallback(() => {
+    clearLensStreamFlushTimer()
+    lensStreamBufferRef.current = { content: '', reasoning: '' }
+  }, [clearLensStreamFlushTimer])
+
+  const scheduleLensStreamFlush = useCallback(() => {
+    if (lensStreamFlushTimerRef.current) return
+    lensStreamFlushTimerRef.current = window.setTimeout(() => {
+      lensStreamFlushTimerRef.current = null
+      flushLensStreamBuffer()
+    }, 48)
+  }, [flushLensStreamBuffer])
 
   // 选中文本行数：translate 模式不计；空 / 仅空白 → 0（驱动徽章是否显示）
   const selectionLineCount = useMemo(() => {
@@ -1122,7 +1427,10 @@ export default function Lens() {
     void api.lensSetHitRegion(null).catch(err => console.error('[lens-floating] clear hit region failed:', err))
     setHitRegionRect(null)
     stopSpeechPlayback()
+    cancelPromptOptimization()
     panelDraggingRef.current = false
+    setPanelDragActive(false)
+    closingStreamRef.current = false
     if (closeResetTimerRef.current) {
       clearTimeout(closeResetTimerRef.current)
       closeResetTimerRef.current = null
@@ -1140,6 +1448,8 @@ export default function Lens() {
     translateOriginalEditedRef.current = false
     ignoreTranslateStreamRef.current = false
     fullscreenMetricsRef.current = null
+    chatAutoFollowRef.current = true
+    resetLensStreamBuffer()
     // 重新加载设置：用户在设置面板修改后关闭再打开 Lens，需要读到最新值。按当前 mode 选 lens / screenshotTranslation 配置。
     try {
       const settings = await api.getSettings()
@@ -1256,7 +1566,7 @@ export default function Lens() {
     }
     await api.showWindow()
     focusLensInput()
-  }, [focusLensInput, setLensCursorPassthrough, stopSpeechPlayback])
+  }, [cancelPromptOptimization, focusLensInput, resetLensStreamBuffer, setLensCursorPassthrough, stopSpeechPlayback])
 
   useEffect(() => {
     void enterSelect()
@@ -1358,22 +1668,21 @@ export default function Lens() {
     api.onLensStream((payload: LensStreamPayload) => {
       if (payload.imageId !== imageIdRef.current) return
       if (payload.done) {
+        clearLensStreamFlushTimer()
+        flushLensStreamBuffer(true)
+        if (payload.reason === 'done') {
+          justFinishedStreamRef.current = true
+        }
         setStreaming(false)
         return
       }
       if (payload.reasoningDelta) {
-        setMessages(prev => {
-          const last = prev[prev.length - 1]
-          if (!last || last.role !== 'assistant') return prev
-          return [...prev.slice(0, -1), { ...last, reasoning: (last.reasoning ?? '') + payload.reasoningDelta }]
-        })
+        lensStreamBufferRef.current.reasoning += payload.reasoningDelta
+        scheduleLensStreamFlush()
       }
       if (payload.delta) {
-        setMessages(prev => {
-          const last = prev[prev.length - 1]
-          if (!last || last.role !== 'assistant') return prev
-          return [...prev.slice(0, -1), { ...last, content: last.content + payload.delta }]
-        })
+        lensStreamBufferRef.current.content += payload.delta
+        scheduleLensStreamFlush()
       }
     }).then((dispose) => {
       if (cancelled) dispose()
@@ -1381,16 +1690,22 @@ export default function Lens() {
     }).catch(err => console.error(err))
     return () => {
       cancelled = true
+      clearLensStreamFlushTimer()
       unlisten?.()
     }
-  }, [])
+  }, [clearLensStreamFlushTimer, flushLensStreamBuffer, scheduleLensStreamFlush])
 
-  // messages 变化时自动滚动：正序滚到底（看新内容），倒序滚到顶（最新在顶）
-  useEffect(() => {
+  const updateChatAutoFollow = useCallback(() => {
     const el = chatScrollRef.current
     if (!el) return
-    if (messageOrder === 'desc') el.scrollTop = 0
-    else el.scrollTop = el.scrollHeight
+    chatAutoFollowRef.current = isChatAtLiveEdge(el, messageOrder)
+  }, [messageOrder])
+
+  // messages 变化时只在用户贴近最新消息时跟随；用户手动滚动离开后不抢滚动位置。
+  useLayoutEffect(() => {
+    const el = chatScrollRef.current
+    if (!el) return
+    if (chatAutoFollowRef.current) scrollChatToLiveEdge(el, messageOrder)
   }, [messages, messageOrder])
 
   // Windows WebView2 在 input disabled/read-write 切换后容易丢 caret；回答结束后显式还焦点。
@@ -1416,7 +1731,9 @@ export default function Lens() {
     void api.lensSetHitRegion(null).catch(err => console.error('[lens-floating] clear hit region failed:', err))
     setHitRegionRect(null)
     stopSpeechPlayback()
+    cancelPromptOptimization()
     panelDraggingRef.current = false
+    setPanelDragActive(false)
     if (closeResetTimerRef.current) {
       clearTimeout(closeResetTimerRef.current)
       closeResetTimerRef.current = null
@@ -1430,6 +1747,7 @@ export default function Lens() {
     translateOriginalEditedRef.current = false
     ignoreTranslateStreamRef.current = false
     fullscreenMetricsRef.current = null
+    resetLensStreamBuffer()
     // 防御：和 enterSelect 同理 —— reset 路径不该走持久化
     justFinishedStreamRef.current = false
     flushSync(() => {
@@ -1468,7 +1786,7 @@ export default function Lens() {
     // 让任何还没落地的 takeLensSelection 老 promise 作废，避免关闭后 setSelectionText 拖回来
     selectionReqIdRef.current++
     focusReqIdRef.current++
-  }, [viewport, metrics, setLensCursorPassthrough, stopSpeechPlayback])
+  }, [cancelPromptOptimization, resetLensStreamBuffer, viewport, metrics, setLensCursorPassthrough, stopSpeechPlayback])
 
   const resetAfterClose = useCallback(() => {
     if (closeResetTimerRef.current) clearTimeout(closeResetTimerRef.current)
@@ -1479,18 +1797,20 @@ export default function Lens() {
   }, [resetBeforeHide])
 
   const closeLikeEscape = useCallback(async () => {
-    if (preparingSendRef.current) return
+    if (preparingSendRef.current && !streaming) return
     if (stageRef.current === 'answering' && streaming) {
+      closingStreamRef.current = true
       try { await api.lensCancelStream() } catch (err) { console.error(err) }
+      clearLensStreamFlushTimer()
+      flushLensStreamBuffer(true)
       setStreaming(false)
-      return
     }
     setLensCursorPassthrough(false)
     try { await api.lensClose() } catch (err) { console.error(err) }
     resetAfterClose()
-  }, [resetAfterClose, setLensCursorPassthrough, streaming])
+  }, [clearLensStreamFlushTimer, flushLensStreamBuffer, resetAfterClose, setLensCursorPassthrough, streaming])
 
-  // 全局 Esc：流式时取消流 / 否则关闭
+  // 全局 Esc：流式时先取消模型输出，再关闭 Lens。
   useEffect(() => {
     const handler = async (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
@@ -2361,6 +2681,95 @@ export default function Lens() {
     }
   }
 
+  const handleOptimizeLensPrompt = useCallback(async () => {
+    const source = input.trim()
+    if (!source || streaming || promptOptimizing) return
+
+    const seq = ++promptOptimizeSeqRef.current
+    setPromptOptimizing(true)
+    setHistoryOpen(false)
+    setInput(lang === 'zh' ? '提示词优化中...' : 'Optimizing prompt...')
+    inputRef.current?.focus({ preventScroll: true })
+
+    try {
+      const result = await api.optimizePrompt(source)
+      if (seq !== promptOptimizeSeqRef.current) return
+      const optimized = extractOptimizedPromptForInput(result) || source
+      streamOptimizedPromptIntoInput(optimized, seq)
+    } catch (err) {
+      if (seq !== promptOptimizeSeqRef.current) return
+      console.error('[lens-prompt-optimizer] failed:', err)
+      setInput(source)
+      setPromptOptimizing(false)
+      inputRef.current?.focus({ preventScroll: true })
+    }
+  }, [input, lang, promptOptimizing, streamOptimizedPromptIntoInput, streaming])
+
+  const enterTextOnlyFloatingAnswer = useCallback(async (nextMessages: ExplainMessage[]) => {
+    const width = Math.round(barRect.width)
+    const height = Math.round(READY_BAR_H + FLOATING_GAP + metrics.ANSWER_H)
+    const localX = Math.max(16, Math.min(viewport.w - width - 16, barRect.x))
+    const localY = Math.max(16, Math.min(viewport.h - height - 16, barRect.y))
+    const origin = {
+      x: Math.round(winOrigin.x + localX),
+      y: Math.round(winOrigin.y + localY),
+    }
+    const flySeq = ++nativeFlySeqRef.current
+
+    fullscreenMetricsRef.current = metrics
+    flushSync(() => {
+      setMessages(nextMessages)
+      setStage('answering')
+      setStreaming(true)
+      setFloatingRebased(false)
+      setNativeHitRegionActive(false)
+      setHitRegionRect(null)
+      setPanelDragActive(false)
+      floatingSizeRef.current = null
+      setBarNoTransition(true)
+      setBarRebaseHidden(true)
+      setBarInFlight(false)
+      setJellyActive(false)
+      setBarFlyOffset({ x: 0, y: 0 })
+      setBarRect({ x: 0, y: 0, width })
+    })
+
+    try {
+      await api.lensSetHitRegion(null)
+      await api.lensSetFloating({
+        x: origin.x,
+        y: origin.y,
+        width,
+        height,
+      })
+      if (flySeq !== nativeFlySeqRef.current) return false
+      flushSync(() => {
+        setFloatingRebased(true)
+        setWinOrigin(origin)
+        setViewport({ w: width, h: height })
+        setBarRect({ x: 0, y: 0, width })
+        setBarRebaseHidden(false)
+        setBarNoTransition(false)
+        floatingSizeRef.current = { width, height }
+      })
+      focusLensInput([30, 120, 260])
+      return true
+    } catch (err) {
+      console.error('[lens-floating] text-only native floating failed:', err)
+      flushSync(() => {
+        setFloatingRebased(false)
+        setBarRebaseHidden(false)
+        setBarNoTransition(false)
+        setBarRect({
+          x: Math.round(localX),
+          y: Math.round(localY),
+          width,
+        })
+      })
+      return false
+    }
+  }, [barRect, focusLensInput, metrics, viewport, winOrigin])
+
   const handleSend = async () => {
     if (streaming) return
     const question = input.trim()
@@ -2387,12 +2796,25 @@ export default function Lens() {
     const userMsg: ExplainMessage = { role: 'user', content: userContent }
     const placeholder: ExplainMessage = { role: 'assistant', content: '' }
     const sendMessages: ExplainMessage[] = [...messages, userMsg]
-    flushSync(() => {
-      setMessages([...sendMessages, placeholder])
-      setStage('answering')
-      setStreaming(true)
-    })
+    const nextMessages = [...sendMessages, placeholder]
+    chatAutoFollowRef.current = true
+    resetLensStreamBuffer()
     preparingSendRef.current = true
+    const textOnlyFloating = (
+      mode === 'chat'
+      && !imageIdRef.current
+      && !capturedFrame
+      && !floatingRebased
+    )
+    if (textOnlyFloating) {
+      await enterTextOnlyFloatingAnswer(nextMessages)
+    } else {
+      flushSync(() => {
+        setMessages(nextMessages)
+        setStage('answering')
+        setStreaming(true)
+      })
+    }
 
     // 默认沿用当前 image_id;若有箭头则先合成 + 注册新图,把后续 ask 切到合成版
     try {
@@ -2422,6 +2844,8 @@ export default function Lens() {
       }
       preparingSendRef.current = false
       const result = await api.lensAsk(effectiveImageId || '', sendMessages)
+      clearLensStreamFlushTimer()
+      flushLensStreamBuffer(true)
       if (!result.success) {
         const errText = `${t.lensError}: ${result.error}`
         setMessages(prev => {
@@ -2439,6 +2863,8 @@ export default function Lens() {
         })
       }
     } catch (err) {
+      clearLensStreamFlushTimer()
+      flushLensStreamBuffer(true)
       const msg = err instanceof Error ? err.message : String(err)
       setMessages(prev => {
         const last = prev[prev.length - 1]
@@ -2448,13 +2874,17 @@ export default function Lens() {
     } finally {
       preparingSendRef.current = false
       // ref 在 setStreaming(false) 之前置 true,让持久化 effect 在本次 rerun 中识别这是"流刚结束"路径
-      justFinishedStreamRef.current = true
+      if (!closingStreamRef.current) {
+        justFinishedStreamRef.current = true
+      }
       setStreaming(false)
     }
   }
 
   const handleStop = async () => {
     try { await api.lensCancelStream() } catch (err) { console.error(err) }
+    clearLensStreamFlushTimer()
+    flushLensStreamBuffer(true)
     // 用户主动取消但已经流出部分内容，也持久化 —— 关掉再开历史能接着问
     justFinishedStreamRef.current = true
     setStreaming(false)
@@ -2537,10 +2967,12 @@ export default function Lens() {
   // 取消任何正在跑的流，避免后端继续 emit delta 灌入新恢复的 messages（如果新旧 imageId 巧合相同会污染）
   const restoreHistory = (item: HistoryItem) => {
     setHistoryOpen(false)
+    cancelPromptOptimization()
     if (streaming) {
       void api.lensCancelStream().catch(err => console.error(err))
     }
     imageIdRef.current = item.id
+    chatAutoFollowRef.current = true
     // 防御：恢复历史 setMessages 会触发持久化 effect，但本路径不是"流刚结束"，不该 push 重复条目
     justFinishedStreamRef.current = false
     flushSync(() => {
@@ -2580,6 +3012,8 @@ export default function Lens() {
     if (barFlightTimerRef.current) clearTimeout(barFlightTimerRef.current)
     if (translateEditDebounceRef.current) clearTimeout(translateEditDebounceRef.current)
     translateEditSeqRef.current++
+    promptOptimizeSeqRef.current++
+    if (promptOptimizeTimerRef.current) clearTimeout(promptOptimizeTimerRef.current)
     stopSpeechPlayback()
     focusReqIdRef.current++
     setLensCursorPassthrough(false)
@@ -2601,7 +3035,8 @@ export default function Lens() {
   const showThumb = stage !== 'select' && (imagePreview || appLabel)
   // 流式期间禁止发送/输入，答完之后可对同一张截图继续问新问题（每次仍为独立 Q&A，自动入历史）
   const canSendBlankImageAnalysis = mode === 'chat' && stage === 'ready' && messages.length === 0 && capturedFrame !== null
-  const sendDisabled = streaming || (!input.trim() && !canSendBlankImageAnalysis)
+  const canOptimizePrompt = !!input.trim() && !streaming && !promptOptimizing
+  const sendDisabled = streaming || promptOptimizing || (!input.trim() && !canSendBlankImageAnalysis)
   // 对话栏（输入框）只在 chat 模式显示；translate 模式只渲染浮动结果卡片
   const showBar = mode === 'chat'
   const hideSelectBar = mode === 'chat' && stage === 'select' && selectBarCollapsed
@@ -2627,9 +3062,9 @@ export default function Lens() {
     { value: 'caiyun2', label: t.screenshotTranslationCaiyun2 },
     { value: 'microsoft', label: t.screenshotTranslationMicrosoft },
   ], [t])
-  // 浮动布局生效条件：原生窗口已经真的缩成浮动模式。
-  // 没截图就直接提问的场景下，window 还是全屏 overlay、bar 还在底部居中，此时仍按全屏布局走。
-  const isFloatingLayout = floatingRebased && capturedFrame !== null && stage !== 'select'
+  // 浮动布局生效条件：原生窗口已经真的缩成小浮窗。
+  // 截图后和无截图纯文本对话都走同一套原生浮窗拖动，避免全屏透明层参与鼠标事件。
+  const isFloatingLayout = floatingRebased && stage !== 'select'
   const stableAnswerHeight = isFloatingLayout
     ? fullscreenMetricsRef.current?.ANSWER_H || metrics.ANSWER_H
     : metrics.ANSWER_H
@@ -2720,8 +3155,12 @@ export default function Lens() {
     }
   }, [barRect.y, isFloatingLayout, viewport.h])
 
-  // keepFullscreen=false 时会切换成真正的原生小悬浮窗；这里只服务 keepFullscreen=true 的覆盖层模式。
-  const passThroughOverlay = capturedFrame !== null && stage !== 'select' && !floatingRebased && !barRebaseHidden
+  // 全屏 overlay 只保留可交互面板区域，避免透明 WebView 拦截桌面点击。
+  // 截图路径有 capturedFrame；无截图直接提问时没有 capturedFrame，但 answering 面板同样需要穿透。
+  const passThroughOverlay = stage !== 'select'
+    && !floatingRebased
+    && !barRebaseHidden
+    && (capturedFrame !== null || (mode === 'chat' && stage === 'answering'))
   const passThroughPanelRect = useMemo<Rect | null>(() => {
     if (!passThroughOverlay) return null
 
@@ -2900,6 +3339,11 @@ export default function Lens() {
   useEffect(() => {
     let cancelled = false
     const rect = activePassThroughRect
+    if (panelDragActive) {
+      setNativeHitRegionActive(false)
+      void api.lensSetHitRegion(null).catch(err => console.error('[lens-floating] clear hit region failed:', err))
+      return
+    }
     if (!passThroughOverlay || !rect) {
       setNativeHitRegionActive(false)
       void api.lensSetHitRegion(null).catch(err => console.error('[lens-floating] clear hit region failed:', err))
@@ -2924,11 +3368,16 @@ export default function Lens() {
     }
   }, [
     activePassThroughRect,
+    panelDragActive,
     passThroughOverlay,
     setLensCursorPassthrough,
   ])
 
   useEffect(() => {
+    if (panelDragActive) {
+      setLensCursorPassthrough(false)
+      return
+    }
     if (nativeHitRegionActive) {
       setLensCursorPassthrough(false)
       return
@@ -2983,6 +3432,7 @@ export default function Lens() {
   }, [
     activePassThroughRect,
     nativeHitRegionActive,
+    panelDragActive,
     passThroughOverlay,
     setLensCursorPassthrough,
     winOrigin.x,
@@ -3055,6 +3505,9 @@ export default function Lens() {
     }
 
     panelDraggingRef.current = true
+    setPanelDragActive(true)
+    setNativeHitRegionActive(false)
+    void api.lensSetHitRegion(null).catch(err => console.error('[lens-floating] clear hit region failed:', err))
     setLensCursorPassthrough(false)
 
     setBarNoTransition(true)
@@ -3068,6 +3521,7 @@ export default function Lens() {
       window.removeEventListener('mousemove', onMove, true)
       window.removeEventListener('mouseup', onUp, true)
       panelDraggingRef.current = false
+      setPanelDragActive(false)
       requestAnimationFrame(() => setBarNoTransition(false))
     }
 
@@ -3360,10 +3814,10 @@ export default function Lens() {
                 e.preventDefault()
                 void handleSend()
               }}
-              readOnly={streaming}
-              aria-disabled={streaming}
+              readOnly={streaming || promptOptimizing}
+              aria-disabled={streaming || promptOptimizing}
               placeholder={t.lensAskPlaceholder}
-              className={`flex-1 bg-transparent text-[16px] text-neutral-900 dark:text-white placeholder-neutral-500 dark:placeholder-neutral-400 focus:outline-none cursor-text ${streaming ? 'opacity-60' : ''}`}
+              className={`flex-1 bg-transparent text-[16px] text-neutral-900 dark:text-white placeholder-neutral-500 dark:placeholder-neutral-400 focus:outline-none cursor-text ${streaming || promptOptimizing ? 'opacity-60' : ''}`}
             />
             {/* History dropdown：按钮 + 弹出面板（容器作为 ref，点击外部关闭） */}
             <div ref={historyPanelRef} className="relative shrink-0">
@@ -3455,6 +3909,24 @@ export default function Lens() {
             </button>
             <button
               type="button"
+              onClick={() => void handleOptimizeLensPrompt()}
+              disabled={!canOptimizePrompt}
+              title={promptOptimizing ? t.promptOptimizerOptimizing : t.promptOptimizerOptimize}
+              aria-label={promptOptimizing ? t.promptOptimizerOptimizing : t.promptOptimizerOptimize}
+              className={`shrink-0 w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-150 active:scale-95 ${
+                canOptimizePrompt
+                  ? 'bg-[#2563eb] hover:bg-[#1d4ed8] hover:scale-105 cursor-pointer text-white'
+                  : 'bg-neutral-200 dark:bg-neutral-700 cursor-not-allowed text-neutral-400 dark:text-neutral-500'
+              }`}
+            >
+              <Sparkles
+                size={18}
+                strokeWidth={2.15}
+                className={promptOptimizing ? 'animate-pulse' : ''}
+              />
+            </button>
+            <button
+              type="button"
               onClick={() => void closeLikeEscape()}
               title={t.shotClose}
               aria-label={t.shotClose}
@@ -3513,7 +3985,11 @@ export default function Lens() {
                 </div>
               )
               return (
-              <div ref={chatScrollRef} className="h-full overflow-y-auto custom-scrollbar px-3.5 py-3">
+              <div
+                ref={chatScrollRef}
+                className="h-full overflow-y-auto custom-scrollbar px-3.5 py-3"
+                onScroll={updateChatAutoFollow}
+              >
                 {/* desc 模式下操作按钮放最前（贴最新答案） */}
                 {messageOrder === 'desc' && showActions && Actions}
                 {ordered.map((m, displayIdx) => {
@@ -3537,9 +4013,7 @@ export default function Lens() {
                             />
                           )}
                           {m.content ? (
-                            <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
-                              {m.content}
-                            </ReactMarkdown>
+                            <StreamingMarkdownText text={m.content} active={isLast && streaming} />
                           ) : isLast && streaming && !m.reasoning ? (
                             <div className="not-prose flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
                               <Loader2 className="animate-spin" size={14} />

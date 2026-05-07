@@ -3,7 +3,7 @@ import {
   X, Save, Plus, Trash2, RefreshCw,
   Settings as SettingsIcon, Languages, Camera,
   Cloud, Info, Palette, Keyboard, SlidersHorizontal, Globe,
-  Cpu, FileText, ShieldCheck, Aperture, ExternalLink, ChevronRight
+  Cpu, FileText, ShieldCheck, Aperture, ExternalLink, ChevronRight, Sparkles
 } from 'lucide-react'
 import { open } from '@tauri-apps/plugin-dialog'
 import { api, type Settings as SettingsType, type ModelProvider, type DefaultPromptTemplates, type PermissionStatus } from './api/tauri'
@@ -18,6 +18,7 @@ import {
 
 type SettingsData = SettingsType
 type TranslationMethod = NonNullable<SettingsData['screenshotTranslation']['translationMethod']>
+type ThinkingEffort = NonNullable<SettingsData['lens']['thinkingEffort']>
 
 interface SettingsProps {
   onClose: () => void
@@ -34,11 +35,11 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [appVersion, setAppVersion] = useState('')
-  const [activeTab, setActiveTab] = useState<'general' | 'translate' | 'screenshot' | 'lens' | 'providers' | 'about'>('general')
+  const [activeTab, setActiveTab] = useState<'general' | 'translate' | 'screenshot' | 'lens' | 'promptOptimizer' | 'providers' | 'about'>('general')
   const [saveError, setSaveError] = useState('')
   const [saveSuccess, setSaveSuccess] = useState(false)
   const [closeConfirmOpen, setCloseConfirmOpen] = useState(false)
-  const [recordingTarget, setRecordingTarget] = useState<null | 'main' | 'screenshotTranslation' | 'lens'>(null)
+  const [recordingTarget, setRecordingTarget] = useState<null | 'main' | 'screenshotTranslation' | 'lens' | 'promptOptimizer'>(null)
   const [defaultPrompts, setDefaultPrompts] = useState<DefaultPromptTemplates | null>(null)
   const [retryAttemptsInput, setRetryAttemptsInput] = useState('')
   const [permissionStatus, setPermissionStatus] = useState<PermissionStatus | null>(null)
@@ -65,6 +66,12 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
     { value: 'yandex', label: t.screenshotTranslationYandex },
     { value: 'caiyun2', label: t.screenshotTranslationCaiyun2 },
     { value: 'microsoft', label: t.screenshotTranslationMicrosoft },
+  ]
+  const thinkingEffortOptions: { value: ThinkingEffort; label: string }[] = [
+    { value: 'low', label: t.thinkingEffortLow },
+    { value: 'medium', label: t.thinkingEffortMedium },
+    { value: 'high', label: t.thinkingEffortHigh },
+    { value: 'xhigh', label: t.thinkingEffortXHigh },
   ]
   // 判断是否有未保存的更改
   const hasUnsavedChanges = settings ? JSON.stringify(settings) !== initialSettingsSnapshot : false
@@ -413,6 +420,10 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
     const lensProvider = lensHadOwnProvider
       ? resolveProvider(nextProviders, settings.lens?.providerId || '')
       : undefined
+    const promptOptimizerHadOwnProvider = !!settings.promptOptimizer?.providerId
+    const promptOptimizerProvider = promptOptimizerHadOwnProvider
+      ? resolveProvider(nextProviders, settings.promptOptimizer?.providerId || '')
+      : undefined
 
     setSettings({
       ...settings,
@@ -431,6 +442,13 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
           ...settings.lens,
           providerId: lensProvider ? lensProvider.id : '',
           model: resolveModel(lensProvider, settings.lens?.model || '')
+        }
+      } : {}),
+      ...(promptOptimizerHadOwnProvider ? {
+        promptOptimizer: {
+          ...settings.promptOptimizer,
+          providerId: promptOptimizerProvider ? promptOptimizerProvider.id : '',
+          model: resolveModel(promptOptimizerProvider, settings.promptOptimizer?.model || '')
         }
       } : {})
     })
@@ -497,6 +515,13 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
         next.lens = {
           ...prev.lens,
           model: resolveAfterRemoval(prev.lens.model || ''),
+        }
+      }
+
+      if (prev.promptOptimizer?.providerId === providerId) {
+        next.promptOptimizer = {
+          ...prev.promptOptimizer,
+          model: resolveAfterRemoval(prev.promptOptimizer.model || ''),
         }
       }
 
@@ -567,6 +592,7 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
         },
         directTranslate: false,
         thinkingEnabled: false,
+        thinkingEffort: 'medium',
         streamEnabled: true,
         ocrPrompt: '',
         prompt: ''
@@ -598,6 +624,8 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
         defaultLanguage: '',
         streamEnabled: true,
         thinkingEnabled: true,
+        thinkingEffort: 'medium',
+        webSearchEnabled: true,
         systemPrompt: '',
         questionPrompt: '',
         messageOrder: 'asc' as const
@@ -607,14 +635,34 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
   }, [])
 
   /**
+   * 更新提示词优化配置
+   */
+  const updatePromptOptimizer = useCallback((updates: Partial<SettingsData['promptOptimizer']>) => {
+    setSettings((prev) => {
+      if (!prev) return prev
+      const current = prev.promptOptimizer || {
+        enabled: true,
+        hotkey: 'Control+Alt+P',
+        providerId: '',
+        model: '',
+        defaultLanguage: '',
+        systemPrompt: '',
+        optimizePrompt: '',
+      }
+      return { ...prev, promptOptimizer: { ...current, ...updates } }
+    })
+  }, [])
+
+  /**
    * 切换快捷键录制状态
    */
-  const toggleRecording = (target: 'main' | 'screenshotTranslation' | 'lens') => {
+  const toggleRecording = (target: 'main' | 'screenshotTranslation' | 'lens' | 'promptOptimizer') => {
     setRecordingTarget((current) => (current === target ? null : target))
   }
 
   // 当前语言对应的默认 lens 提示词
   const lensDefaults = defaultPrompts?.lensPrompts?.[settings?.lens?.defaultLanguage === 'en' ? 'en' : 'zh']
+  const promptOptimizerDefaults = defaultPrompts?.promptOptimizerPrompts?.[settings?.promptOptimizer?.defaultLanguage === 'en' ? 'en' : 'zh']
   const modelPairOptions = settings?.providers.flatMap(p =>
     p.enabledModels.map(m => ({
       value: `${p.id}:${m}`,
@@ -691,12 +739,14 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
         updateScreenshotTranslation({ hotkey })
       } else if (recordingTarget === 'lens') {
         updateLens({ hotkey })
+      } else if (recordingTarget === 'promptOptimizer') {
+        updatePromptOptimizer({ hotkey })
       }
       setRecordingTarget(null)
     }
     window.addEventListener('keydown', handler, true)
     return () => window.removeEventListener('keydown', handler, true)
-  }, [recordingTarget, updateLens, updateScreenshotTranslation, updateSettings])
+  }, [recordingTarget, updateLens, updatePromptOptimizer, updateScreenshotTranslation, updateSettings])
 
   if (loading) {
     return (
@@ -757,6 +807,7 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
             { id: 'translate' as const, label: t.tabTranslate, icon: Languages },
             { id: 'screenshot' as const, label: t.tabScreenshot, icon: Camera },
             { id: 'lens' as const, label: t.lensTabLabel, icon: Aperture },
+            { id: 'promptOptimizer' as const, label: t.promptOptimizerTabLabel, icon: Sparkles },
             { id: 'providers' as const, label: t.tabModels, icon: Cloud },
             { id: 'about' as const, label: lang === 'zh' ? '关于' : 'About', icon: Info },
           ].map((item) => {
@@ -1320,15 +1371,27 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
                     )}
 
                     {(screenshotOcrMethod === 'ai' || screenshotTranslationMethod === 'ai') && (
-                      <SettingRow
-                        label={t.screenshotTranslationThinking}
-                        description={t.screenshotTranslationThinkingHint}
-                      >
-                        <Toggle
-                          checked={settings.screenshotTranslation?.thinkingEnabled ?? false}
-                          onChange={(v) => updateScreenshotTranslation({ thinkingEnabled: v })}
-                        />
-                      </SettingRow>
+                      <>
+                        <SettingRow
+                          label={t.screenshotTranslationThinking}
+                          description={t.screenshotTranslationThinkingHint}
+                        >
+                          <Toggle
+                            checked={settings.screenshotTranslation?.thinkingEnabled ?? false}
+                            onChange={(v) => updateScreenshotTranslation({ thinkingEnabled: v })}
+                          />
+                        </SettingRow>
+                        {(settings.screenshotTranslation?.thinkingEnabled ?? false) && (
+                          <SettingRow label={t.thinkingEffort}>
+                            <Select
+                              className="w-36"
+                              value={settings.screenshotTranslation?.thinkingEffort || 'medium'}
+                              onChange={(v) => updateScreenshotTranslation({ thinkingEffort: v as ThinkingEffort })}
+                              options={thinkingEffortOptions}
+                            />
+                          </SettingRow>
+                        )}
+                      </>
                     )}
                   </div>
                 </section>
@@ -1449,6 +1512,22 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
                           onChange={(v) => updateLens({ thinkingEnabled: v })}
                         />
                       </SettingRow>
+                      {settings.lens?.thinkingEnabled !== false && (
+                        <SettingRow label={t.thinkingEffort}>
+                          <Select
+                            className="w-36"
+                            value={settings.lens?.thinkingEffort || 'medium'}
+                            onChange={(v) => updateLens({ thinkingEffort: v as ThinkingEffort })}
+                            options={thinkingEffortOptions}
+                          />
+                        </SettingRow>
+                      )}
+                      <SettingRow label={t.lensWebSearchEnabled} description={t.lensWebSearchHint}>
+                        <Toggle
+                          checked={settings.lens?.webSearchEnabled !== false}
+                          onChange={(v) => updateLens({ webSearchEnabled: v })}
+                        />
+                      </SettingRow>
                       <SettingRow label={t.lensMessageOrder}>
                         <Select
                           className="w-52"
@@ -1513,6 +1592,106 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
                             />
                             {!settings.lens?.questionPrompt?.trim() && lensDefaults?.question && (
                               <DefaultPrompt label={t.defaultTemplate} content={lensDefaults.question} />
+                            )}
+                          </div>
+                        </div>
+                      </details>
+                    </>
+                  )}
+                </div>
+              </div>
+            </section>
+          </div>
+        )}
+
+        {/* ===== 提示词优化标签页 ===== */}
+        {activeTab === 'promptOptimizer' && (
+          <div className="space-y-8 animate-in fade-in slide-in-from-bottom-2 duration-300">
+            <section>
+              <SectionTitle icon={Sparkles}>{t.promptOptimizerSection}</SectionTitle>
+              <div className="settings-card overflow-hidden">
+                <div className="divide-y divide-black/[0.04] dark:divide-white/[0.05]">
+                  <SettingRow label={t.enabled}>
+                    <Toggle
+                      checked={settings.promptOptimizer?.enabled !== false}
+                      onChange={(v) => updatePromptOptimizer({ enabled: v })}
+                    />
+                  </SettingRow>
+
+                  {settings.promptOptimizer?.enabled !== false && (
+                    <>
+                      <div className="px-4 py-3 space-y-1.5">
+                        <span className="text-[12px] font-medium text-neutral-700 dark:text-neutral-200">{t.promptOptimizerHotkey}</span>
+                        <HotkeyInput
+                          value={settings.promptOptimizer?.hotkey || 'Control+Alt+P'}
+                          placeholder="Control+Alt+P"
+                          recording={recordingTarget === 'promptOptimizer'}
+                          onToggleRecording={() => toggleRecording('promptOptimizer')}
+                          recordLabel={t.hotkeyRecord}
+                          recordingLabel={t.hotkeyRecording}
+                          recordingPlaceholder={t.hotkeyRecordingPlaceholder}
+                        />
+                      </div>
+                      <SettingRow label={t.promptOptimizerResponseLanguage}>
+                        <Select
+                          className="w-44"
+                          value={settings.promptOptimizer?.defaultLanguage || ''}
+                          onChange={(v) => updatePromptOptimizer({ defaultLanguage: v })}
+                          options={[
+                            { value: '', label: t.lensLanguageInherit },
+                            { value: 'zh', label: '中文' },
+                            { value: 'zh-Hant', label: '繁體中文' },
+                            { value: 'en', label: 'English' },
+                          ]}
+                        />
+                      </SettingRow>
+                      <SettingRow label={t.selectModelPair}>
+                        <Select
+                          className="w-52"
+                          value={`${settings.promptOptimizer?.providerId || ''}:${settings.promptOptimizer?.model || ''}`}
+                          onChange={(v) => {
+                            const [providerId, model] = v.split(':')
+                            updatePromptOptimizer({ providerId, model })
+                          }}
+                          options={[
+                            { value: ':', label: t.lensLanguageInherit },
+                            ...settings.providers.flatMap(p =>
+                              p.enabledModels.map(m => ({
+                                value: `${p.id}:${m}`,
+                                label: `${p.name} - ${m}`
+                              }))
+                            )
+                          ]}
+                        />
+                      </SettingRow>
+                      <details className="group border-t border-black/[0.04] dark:border-white/[0.05]">
+                        <summary className="flex items-center gap-1.5 cursor-pointer text-[12px] font-medium text-neutral-600 dark:text-neutral-300 hover:text-neutral-900 dark:hover:text-neutral-100 hover:bg-black/[0.02] dark:hover:bg-white/[0.025] transition-colors list-none px-4 py-3">
+                          <ChevronRight size={13} className="text-neutral-400 dark:text-neutral-500 group-open:rotate-90 transition-transform duration-200" strokeWidth={2.25} />
+                          {t.customPrompts}
+                        </summary>
+                        <div className="px-4 pb-4 space-y-4">
+                          <div>
+                            <Label>{t.promptOptimizerSystemPrompt}</Label>
+                            <TextArea
+                              value={settings.promptOptimizer?.systemPrompt || ''}
+                              onChange={(v) => updatePromptOptimizer({ systemPrompt: v })}
+                              placeholder={t.lensPromptHint}
+                              rows={3}
+                            />
+                            {!settings.promptOptimizer?.systemPrompt?.trim() && promptOptimizerDefaults?.system && (
+                              <DefaultPrompt label={t.defaultTemplate} content={promptOptimizerDefaults.system} />
+                            )}
+                          </div>
+                          <div>
+                            <Label>{t.promptOptimizerOptimizePrompt}</Label>
+                            <TextArea
+                              value={settings.promptOptimizer?.optimizePrompt || ''}
+                              onChange={(v) => updatePromptOptimizer({ optimizePrompt: v })}
+                              placeholder={t.promptOptimizerPromptHint}
+                              rows={5}
+                            />
+                            {!settings.promptOptimizer?.optimizePrompt?.trim() && promptOptimizerDefaults?.optimize && (
+                              <DefaultPrompt label={t.defaultTemplate} content={promptOptimizerDefaults.optimize} />
                             )}
                           </div>
                         </div>
