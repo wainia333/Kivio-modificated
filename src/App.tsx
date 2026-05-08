@@ -107,10 +107,6 @@ function PaneResizeHandle({
   )
 }
 
-/**
- * 翻译器主组件
- * 磨砂玻璃风格悬浮窗：顶部 drag bar、输入与结果分层级、底部提示与模型芯片。
- */
 function Translator({
   translateSource,
   lang,
@@ -212,7 +208,6 @@ function Translator({
     }
   }, [input, methodSwitching, runTranslationNow, translationMethod])
 
-  // 输入防抖翻译：600ms 延迟后发送翻译请求
   useEffect(() => {
     const trimmed = input.trim()
     if (!trimmed) {
@@ -279,7 +274,6 @@ function Translator({
     }
   }, [])
 
-  // Esc 键隐藏窗口
   useEffect(() => {
     const handler = async (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
@@ -290,14 +284,12 @@ function Translator({
     return () => window.removeEventListener('keydown', handler)
   }, [closeTranslatorWindow])
 
-  // 结果区域自动滚动到底部
   useEffect(() => {
     if (resultRef.current) {
       resultRef.current.scrollTop = resultRef.current.scrollHeight
     }
   }, [result])
 
-  // 多行原文区中，普通 Enter 保持换行；Ctrl/Command + Enter 才提交翻译结果。
   // IME 合成中（中/日/韩输入法选词按回车）不要触发：isComposing 是组合事件官方标志，
   // keyCode === 229 是浏览器在 IME 拦截 keydown 时的兜底信号，两个条件并查更稳。
   const handleKeyDown = async (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -314,15 +306,12 @@ function Translator({
 
   return (
     <div className="window-container">
-      {/* 卡片：填满外壳 padding 内区域；圆角 + 阴影都在这层 */}
       <div className="window-frosted h-full w-full flex flex-col select-none overflow-hidden relative group">
-        {/* 顶部隐形 drag bar */}
         <div
           className="absolute top-0 left-0 right-0 h-8 z-10"
           data-tauri-drag-region
         />
 
-        {/* 关闭按钮（悬浮右上角） */}
         <button
           onClick={() => void closeTranslatorWindow()}
           className="absolute top-1.5 right-2 z-20 p-1 text-neutral-400 hover:text-neutral-700 dark:text-neutral-500 dark:hover:text-neutral-200 rounded-md hover:bg-black/5 dark:hover:bg-white/10 opacity-60 hover:opacity-100 transition-all duration-150"
@@ -333,7 +322,6 @@ function Translator({
           <X size={13} strokeWidth={1.9} />
         </button>
 
-        {/* 主内容区 */}
         <div className="relative z-0 flex h-full min-h-0 flex-col px-4 pt-4 pb-3">
           <div className="h-5 shrink-0" data-tauri-drag-region />
 
@@ -406,7 +394,6 @@ function Translator({
             </section>
           </div>
 
-          {/* 底部提示 */}
           <div className="mt-2.5 flex shrink-0 justify-between items-center text-[10px] text-neutral-400 dark:text-neutral-500">
             <div className="flex items-center gap-2">
               <span>{t.translatorHintEnter}</span>
@@ -655,12 +642,7 @@ function PromptOptimizer({
   )
 }
 
-/**
- * 应用根组件
- * 根据 URL hash 切换不同视图模式（翻译器、设置、lens）
- */
 function App() {
-  // 从 URL hash 和查询参数解析当前模式
   const getMode = () => {
     const urlParams = new URLSearchParams(window.location.search)
     const hash = window.location.hash.replace('#', '')
@@ -672,7 +654,6 @@ function App() {
   const [translateSource, setTranslateSource] = useState<string>('')
   const [lang, setLang] = useState<Lang>('zh')
 
-  // 应用主题设置
   const applyTheme = async () => {
     const settings = await api.getSettings()
     const nextMode = (settings.theme || 'system') as 'system' | 'light' | 'dark'
@@ -687,7 +668,6 @@ function App() {
     setLang((settings.settingsLanguage as Lang) || 'zh')
   }
 
-  // 初始化主题并监听系统主题变化
   useEffect(() => {
     applyTheme()
     const mq = window.matchMedia('(prefers-color-scheme: dark)')
@@ -698,16 +678,12 @@ function App() {
     return () => mq.removeEventListener('change', changeHandler)
   }, [themeMode])
 
-  // 监听 hash 变化切换模式
   useEffect(() => {
     const handler = () => setMode(getMode())
     window.addEventListener('hashchange', handler)
     return () => window.removeEventListener('hashchange', handler)
   }, [])
 
-  // 监听后端触发的打开设置事件
-  // 仅 main webview（hash 为空 / translator / settings）响应；
-  // lens webview 即便误收广播也不切换视图，避免多设置界面。
   useEffect(() => {
     let cleanup: (() => void) | undefined
     api.onOpenSettings(() => {
@@ -723,7 +699,6 @@ function App() {
     }
   }, [])
 
-  // 根据当前模式调整窗口大小
   useEffect(() => {
     const resize = async () => {
       if (mode === 'settings') {
@@ -737,7 +712,6 @@ function App() {
     resize()
   }, [mode])
 
-  // 关闭设置页，返回翻译器
   const closeSettings = async () => {
     try {
       await api.hideWindow()
@@ -749,7 +723,6 @@ function App() {
     await api.resizeWindow(TRANSLATOR_WINDOW_W, TRANSLATOR_WINDOW_H)
   }
 
-  // 根据模式渲染对应视图
   if (mode === 'lens') {
     return (
       <Suspense fallback={null}>

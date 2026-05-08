@@ -68,11 +68,8 @@ use windows::{ensure_main_window, get_main_window};
 #[cfg(target_os = "windows")]
 use xcap::Monitor;
 
-/// 自启动参数，用于区分用户手动启动和系统自动启动
 const AUTOSTART_ARG: &str = "--from-autostart";
 
-/// 应用开机自启动设置
-/// 根据传入的 enabled 参数启用或禁用自动启动
 fn apply_launch_at_startup(app: &AppHandle, enabled: bool) -> Result<(), String> {
     let auto_launch = app.autolaunch();
     let current = auto_launch.is_enabled().map_err(|e| e.to_string())?;
@@ -86,14 +83,11 @@ fn apply_launch_at_startup(app: &AppHandle, enabled: bool) -> Result<(), String>
     Ok(())
 }
 
-/// 获取当前应用设置
 #[tauri::command]
 fn get_settings(state: State<AppState>) -> Settings {
     state.settings_read().clone()
 }
 
-/// 获取默认提示词模板
-/// 返回翻译模板、截图翻译模板，以及 lens 视觉对话用的系统/提问提示词
 #[tauri::command]
 fn get_default_prompt_templates() -> serde_json::Value {
     serde_json::json!({
@@ -123,9 +117,6 @@ fn get_default_prompt_templates() -> serde_json::Value {
     })
 }
 
-/// 保存设置
-/// 先对传入的设置进行清理（sanitize），然后应用开机自启动、重新注册热键、持久化设置、更新托盘菜单
-/// 如果热键注册失败，则回滚运行时设置到之前的状态
 #[tauri::command]
 fn save_settings(app: AppHandle, state: State<AppState>, settings: Settings) -> Result<(), String> {
     apply_settings(&app, &state, settings).map(|_| ())
@@ -163,14 +154,16 @@ fn apply_settings(
 }
 
 #[tauri::command]
-async fn export_settings_config(app: AppHandle, state: State<'_, AppState>) -> Result<bool, String> {
+async fn export_settings_config(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
     let filename = format!(
         "kivio-settings-{}.json",
         chrono::Local::now().format("%Y-%m-%d-%H%M%S")
     );
     let (tx, rx) = tokio::sync::oneshot::channel();
-    app
-        .dialog()
+    app.dialog()
         .file()
         .set_title("导出 Kivio 配置")
         .set_file_name(filename)
@@ -178,9 +171,7 @@ async fn export_settings_config(app: AppHandle, state: State<'_, AppState>) -> R
         .save_file(move |path| {
             let _ = tx.send(path);
         });
-    let Some(file_path) = rx
-        .await
-        .map_err(|_| "保存文件对话框已关闭".to_string())?
+    let Some(file_path) = rx.await.map_err(|_| "保存文件对话框已关闭".to_string())?
     else {
         return Ok(false);
     };
@@ -208,17 +199,14 @@ async fn import_settings_config(
     state: State<'_, AppState>,
 ) -> Result<Option<Settings>, String> {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    app
-        .dialog()
+    app.dialog()
         .file()
         .set_title("导入 Kivio 配置")
         .add_filter("Kivio Settings", &["json"])
         .pick_file(move |path| {
             let _ = tx.send(path);
         });
-    let Some(file_path) = rx
-        .await
-        .map_err(|_| "打开文件对话框已关闭".to_string())?
+    let Some(file_path) = rx.await.map_err(|_| "打开文件对话框已关闭".to_string())?
     else {
         return Ok(None);
     };
@@ -227,14 +215,12 @@ async fn import_settings_config(
     let value: serde_json::Value =
         serde_json::from_str(&raw).map_err(|e| format!("配置文件不是有效 JSON: {e}"))?;
     let settings_value = value.get("settings").cloned().unwrap_or(value);
-    let imported: Settings = serde_json::from_value(settings_value)
-        .map_err(|e| format!("配置文件格式不正确: {e}"))?;
+    let imported: Settings =
+        serde_json::from_value(settings_value).map_err(|e| format!("配置文件格式不正确: {e}"))?;
     let sanitized = apply_settings(&app, &state, imported)?;
     Ok(Some(sanitized))
 }
 
-/// 翻译文本命令
-/// 使用与 OCR+翻译共享的翻译接口设置：AI / 百度 / Google / 腾讯 / Bing / Bing2 / Yandex / 彩云2 / Microsoft。
 #[tauri::command]
 async fn translate_text(state: State<'_, AppState>, text: String) -> Result<String, String> {
     let trimmed = text.trim();
@@ -311,7 +297,6 @@ async fn translate_text(state: State<'_, AppState>, text: String) -> Result<Stri
     .await
 }
 
-/// 优化提示词：根据提示词优化器设置选择 provider/model，并输出可复制的优化建议。
 #[tauri::command]
 async fn optimize_prompt(state: State<'_, AppState>, text: String) -> Result<String, String> {
     let trimmed = text.trim();
@@ -350,8 +335,6 @@ async fn optimize_prompt(state: State<'_, AppState>, text: String) -> Result<Str
     .await
 }
 
-/// 提交翻译结果
-/// 将翻译后的文本写入剪贴板，隐藏主窗口，如果启用了自动粘贴则发送粘贴快捷键到之前的应用
 #[tauri::command]
 async fn commit_translation(
     app: AppHandle,
@@ -366,7 +349,6 @@ async fn commit_translation(
     let mut clipboard = Clipboard::new().map_err(|e| e.to_string())?;
     clipboard.set_text(text).map_err(|e| e.to_string())?;
 
-    // 先隐藏窗口，让焦点回到之前的应用
     if let Some(window) = get_main_window(&app) {
         let _ = window.hide();
     }
@@ -381,7 +363,6 @@ async fn commit_translation(
     }
 
     if auto_paste {
-        // 增加延迟以确保焦点切换完成
         tokio::time::sleep(Duration::from_millis(600)).await;
         send_paste_shortcut();
     }
@@ -728,8 +709,6 @@ fn capture_active_selection_fast() -> Option<String> {
     read_accessibility_selected_text()
 }
 
-/// 取走 Rust 端在 lens_request_internal 中暂存的 selection 文本。
-/// 取一次清一次：前端 enterSelect 调用，第二次调用立即返回空串。
 #[tauri::command]
 fn take_lens_selection(state: State<'_, AppState>) -> Result<String, String> {
     match state.pending_selection.lock() {
@@ -738,7 +717,6 @@ fn take_lens_selection(state: State<'_, AppState>) -> Result<String, String> {
     }
 }
 
-/// 取走普通翻译窗口热键启动前抓到的 selection 文本。
 #[tauri::command]
 fn take_translator_selection(state: State<'_, AppState>) -> Result<String, String> {
     match state.pending_translator_selection.lock() {
@@ -747,7 +725,6 @@ fn take_translator_selection(state: State<'_, AppState>) -> Result<String, Strin
     }
 }
 
-/// 使用系统默认浏览器打开外部链接（仅限 https）
 #[tauri::command]
 #[allow(deprecated)]
 fn open_external(app: AppHandle, url: String) -> Result<(), String> {
@@ -1083,7 +1060,6 @@ fn install_update_and_quit(app: AppHandle, path: String) -> Result<(), String> {
     }
 }
 
-/// 读取截图图片并以 Base64 数据 URL 格式返回（lens ready 态显示缩略图用）
 #[tauri::command]
 fn explain_read_image(
     app: AppHandle,
@@ -1098,8 +1074,6 @@ fn explain_read_image(
       "data": format!("data:image/png;base64,{base64}")
     }))
 }
-
-// ====== Lens 模式命令 ======
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1137,7 +1111,6 @@ fn lens_current_screen_space(app: &AppHandle) -> Option<lens::ScreenSpace> {
     })
 }
 
-/// 返回当前鼠标的全局逻辑坐标，供前端在 select 态首次显示时立即做窗口命中。
 #[tauri::command]
 fn lens_cursor_position(app: AppHandle) -> Option<LensCursorPosition> {
     let cursor = app.cursor_position().ok()?;
@@ -1151,16 +1124,6 @@ fn lens_cursor_position(app: AppHandle) -> Option<LensCursorPosition> {
     })
 }
 
-/// 把 lens 窗口铺满目标显示器（用于 select 态）。
-///
-/// 显示器选择优先级：
-///   1. 光标所在显示器（正常路径）
-///   2. primary monitor（cursor_position 失败 / 无 monitor 匹配光标 — 罕见但
-///      合盖切外接、睡眠唤醒后 monitor 列表暂时不一致时会发生）
-///   3. 第一个 monitor（极端兜底，primary 也拿不到时）
-///
-/// 任何兜底都比"什么都不做"强 —— 之前的实现这种情况下窗口停留在上次几何，
-/// 用户看到的就是 ready 浮条 / 旧位置，体验远差于跳到 primary。
 fn lens_position_fullscreen(app: &AppHandle, window: &WebviewWindow) {
     let cursor_opt = app.cursor_position().ok();
     let monitors = match app.available_monitors() {
@@ -1175,7 +1138,6 @@ fn lens_position_fullscreen(app: &AppHandle, window: &WebviewWindow) {
         }
     };
 
-    // 1. 找光标所在的 monitor
     let target = cursor_opt.as_ref().and_then(|cursor| {
         monitors.iter().find(|monitor| {
             let mp = monitor.position();
@@ -1189,12 +1151,9 @@ fn lens_position_fullscreen(app: &AppHandle, window: &WebviewWindow) {
         })
     });
 
-    // 2-3. fallback: primary monitor，再不行第一个 monitor
     let target = target
         .or_else(|| {
             let p = app.primary_monitor().ok().flatten();
-            // primary_monitor 返回 Option<Monitor> 而 monitors iter 给的是 &Monitor，
-            // 这里需要从 monitors 里按 name 找回相同的 monitor 引用，避免类型不一致
             p.and_then(|prim| monitors.iter().find(|m| m.name() == prim.name()))
         })
         .or_else(|| monitors.first());
@@ -1260,18 +1219,11 @@ fn native_freeze_close_for_lens(app: &AppHandle) {
     }
 }
 
-/// 入口（公共底层）：打开 lens webview 进入 select 态。
-/// mode：
-///   - "chat"（默认）：截完进对话栏 ready 态
-///   - "translate"：截完直接做 OCR + 翻译，弹原文/译文浮动卡
 fn lens_request_internal(app: &AppHandle, mode: &str) -> Result<(), String> {
-    // 预热 SCK SCShareableContent 缓存，摊销首次截图的 WindowServer 查询开销。
-    // 用户从按热键到选目标 + 单击截图通常 ≥ 300 ms，足以盖住 30-80 ms 的 prewarm。
     #[cfg(target_os = "macos")]
     crate::sck::prewarm();
 
     let state = app.state::<AppState>();
-    // 自愈：busy=true 但 lens 窗口已不可见（外部强关 / dev 重载等异常），重置 busy
     if state.lens_busy.load(Ordering::SeqCst) {
         let visible = app
             .get_webview_window("lens")
@@ -1285,8 +1237,6 @@ fn lens_request_internal(app: &AppHandle, mode: &str) -> Result<(), String> {
         return Err("Lens already active".to_string());
     }
 
-    // 必须在 ensure_lens_window/show/set_focus 之前抓取。创建隐藏 webview 在 macOS 上也可能
-    // 改变当前 focused UI element，导致 Cmd+C/AXSelectedText 读到 Lens 自己而不是前台 App。
     let pending_selection = if mode == "chat" {
         capture_active_selection_fast()
     } else {
@@ -1308,11 +1258,9 @@ fn lens_request_internal(app: &AppHandle, mode: &str) -> Result<(), String> {
             eprintln!("[lens-freeze] native overlay failed: {err}");
         }
     }
-    // 结果暂存在 state.pending_selection，等前端 take 走。translate 模式写 None，避免遗留旧值。
     if let Ok(mut guard) = state.pending_selection.lock() {
         *guard = pending_selection;
     }
-    // 把 mode 编码进 hash query，前端通过 location.hash 读取（'#lens?mode=translate'）
     let safe_mode = if mode == "translate" {
         "translate"
     } else {
@@ -1323,8 +1271,6 @@ fn lens_request_internal(app: &AppHandle, mode: &str) -> Result<(), String> {
     mode = safe_mode,
   );
     let _ = window.eval(&script);
-    // 先在 hidden 状态下尝试定位：即便部分系统下 hidden 窗口 set_position 被忽略，也比
-    // 不调强（成功则消除"先在旧位置闪一帧再跳到全屏"的可见跳变）。
     lens_position_fullscreen(app, &window);
     #[cfg(target_os = "windows")]
     windows_show_and_focus(&window, true);
@@ -1333,44 +1279,37 @@ fn lens_request_internal(app: &AppHandle, mode: &str) -> Result<(), String> {
         let _ = window.show();
         let _ = window.set_focus();
     }
-    // show 后再调，处理 always_on_top + visible_on_all_workspaces 把首次 set_position 吃掉的情况
     lens_position_fullscreen(app, &window);
     #[cfg(target_os = "windows")]
     native_freeze_place_lens_above(&window);
     Ok(())
 }
 
-/// 默认入口：lens 模式（commit 后进 ready 悬浮栏）
 #[tauri::command]
 fn lens_request(app: AppHandle) -> Result<(), String> {
     lens_request_internal(&app, "chat")
 }
 
-/// 截图翻译入口：lens webview 进入 select 态，截完做 OCR + 翻译并弹结果浮卡
 #[tauri::command]
 fn lens_request_translate(app: AppHandle) -> Result<(), String> {
     lens_request_internal(&app, "translate")
 }
 
-/// 返回当前屏幕上可见窗口/控件列表，用于截图选择态自动框选。
 #[tauri::command]
 fn lens_list_windows(app: AppHandle) -> Vec<lens::WindowInfo> {
     lens::list_windows(lens_current_screen_space(&app))
 }
 
-/// 整窗截图（macOS）：用 `screencapture -l <id>` 按 window id 截，不会截到 lens webview，
-/// 所以无需 hide lens（避免 hide/show 那 ~250ms 的视觉闪烁）。
 #[tauri::command]
 async fn lens_capture_window(app: AppHandle, window_id: u32) -> Result<serde_json::Value, String> {
     let result = lens::capture_window(window_id);
-    let _ = app; // 保留参数避免破坏现有调用签名
+    let _ = app;
 
     match result {
         Ok(path) => {
             let image_id = Uuid::new_v4().to_string();
             let state = app.state::<AppState>();
 
-            // 自动归档（在 insert 前直接用 path，避免二次加锁）
             archive_captured_image(&app, &path, &image_id);
 
             {
@@ -1387,7 +1326,6 @@ async fn lens_capture_window(app: AppHandle, window_id: u32) -> Result<serde_jso
     }
 }
 
-/// 区域截图：复用 capture_region_image 路径，注册 image_id 返回。
 #[tauri::command]
 async fn lens_capture_region(
     app: AppHandle,
@@ -1399,10 +1337,7 @@ async fn lens_capture_region(
     height: u32,
     scale_factor: f64,
 ) -> Result<serde_json::Value, String> {
-    // SCK 路径：把自己 PID 传给 capture_region_image，SCK 在 GPU compositor 排除 lens webview，
-    // 不再需要 hide webview + sleep 60ms 等 NSWindow.orderOut 生效（旧 `screencapture -R` 会截到全屏透明 lens 自己）。
-    // Windows 版 capture_region_image 忽略 exclude_self_pid 参数。
-    let _ = app.get_webview_window("lens"); // 仍引用以保证 webview 存活
+    let _ = app.get_webview_window("lens");
     let exclude_self_pid: Option<i32> = {
         #[cfg(target_os = "macos")]
         {
@@ -1454,7 +1389,6 @@ async fn lens_capture_region(
             let image_id = Uuid::new_v4().to_string();
             let state = app.state::<AppState>();
 
-            // 自动归档（在 insert 前直接用 path，避免二次加锁）
             archive_captured_image(&app, &path, &image_id);
 
             {
@@ -1471,12 +1405,6 @@ async fn lens_capture_region(
     }
 }
 
-/// 多轮提问：调用 vision API 流式发出 lens-stream 事件。
-/// 字段全部独立。空字符串使用默认值：
-///   - default_language：空 → 跟 settings.target_lang（"auto" 视为 "zh"）
-///   - system_prompt / question_prompt：空 → default_system_prompt / default_question_prompt 模板
-///   - provider_id / model：空 → fallback 到 translator_provider_id / translator_model
-///   - stream_enabled：lens 自身配置
 #[tauri::command]
 async fn lens_ask(
     app: AppHandle,
@@ -1576,7 +1504,6 @@ async fn lens_ask(
     }
 }
 
-/// 取消正在进行的 lens 流（复用同一代号）。
 #[tauri::command]
 fn lens_cancel_stream(state: State<AppState>) -> Result<(), String> {
     state
@@ -2527,7 +2454,6 @@ async fn translate_screenshot_text_plain(
     }
 }
 
-/// 截图翻译（lens translate 模式）：先按用户选择的 OCR 接口识别文字，再按用户选择的翻译接口翻译。
 #[tauri::command]
 async fn lens_translate(
     app: AppHandle,
@@ -2603,7 +2529,6 @@ async fn lens_translate(
     }))
 }
 
-/// 只重跑截图翻译的翻译阶段，用于前端修改 OCR 原文后自动重译。
 #[tauri::command]
 async fn lens_translate_text(
     state: State<'_, AppState>,
@@ -2692,8 +2617,6 @@ fn lens_close(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// 将 lens 窗口缩小为浮动尺寸（截图后非全屏模式用）
-/// x/y 为可选，不传则只改尺寸不改位置
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FloatingRect {
@@ -2978,9 +2901,6 @@ fn lens_set_ignore_cursor_events(app: AppHandle, ignore: bool) -> Result<(), Str
     Ok(())
 }
 
-// ====== /Lens 模式命令 ======
-
-/// 从供应商 API 获取可用模型列表
 #[tauri::command]
 async fn fetch_models(
     state: State<'_, AppState>,
@@ -3031,7 +2951,6 @@ async fn fetch_models(
     Ok(models)
 }
 
-/// 测试供应商连接是否可用
 /// 多 key：测试时只用第一个 key（避免一次连接测试遍历多 key 让用户困惑）
 #[tauri::command]
 async fn test_provider_connection(
@@ -3065,7 +2984,6 @@ async fn test_provider_connection(
     }
 }
 
-/// 获取平台权限状态（仅限 macOS：辅助功能和屏幕录制权限）
 #[tauri::command]
 fn get_permission_status() -> serde_json::Value {
     #[cfg(target_os = "macos")]
@@ -3089,7 +3007,6 @@ fn get_permission_status() -> serde_json::Value {
     }
 }
 
-/// 打开系统权限设置面板（仅限 macOS）
 #[tauri::command]
 fn open_permission_settings(kind: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
@@ -3246,8 +3163,6 @@ fn windows_force_window_foreground(window: &WebviewWindow, topmost: bool) {
     }
 }
 
-/// 注册全局热键
-/// 包括翻译热键、截图翻译热键、lens 热键；会检测重复热键并给出友好错误提示
 fn register_hotkeys(app: &AppHandle) -> Result<(), String> {
     let settings = app.state::<AppState>().settings_read().clone();
     let shortcut_manager = app.global_shortcut();
@@ -3372,7 +3287,25 @@ fn register_hotkeys(app: &AppHandle) -> Result<(), String> {
     }
 }
 
-/// 获取当前鼠标位置
+fn retry_register_hotkeys_after_startup(app: AppHandle, first_error: String) {
+    tauri::async_runtime::spawn(async move {
+        eprintln!("Failed to register hotkeys: {first_error}");
+
+        for delay_ms in [250_u64, 600, 1_200, 2_500, 5_000] {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            match register_hotkeys(&app) {
+                Ok(()) => {
+                    eprintln!("[hotkey] registered after retry");
+                    return;
+                }
+                Err(err) => {
+                    eprintln!("[hotkey] retry after {delay_ms}ms failed: {err}");
+                }
+            }
+        }
+    });
+}
+
 fn get_mouse_position(app: &AppHandle) -> Option<tauri::PhysicalPosition<f64>> {
     app.cursor_position().ok()
 }
@@ -3566,13 +3499,10 @@ fn capture_region_image(
     Err("Region capture is not supported on this platform".to_string())
 }
 
-/// 切换主窗口显示/隐藏
-/// 隐藏时直接隐藏；显示时窗口跟随鼠标位置偏移 (10,10) 弹出，翻译器保持置顶
 fn toggle_main_window(app: &AppHandle) {
     toggle_main_window_internal(app, false);
 }
 
-/// 翻译热键入口：显示窗口前先抓取当前前台 App 的选中文本。
 fn toggle_main_window_with_selection(app: &AppHandle) {
     toggle_main_window_internal(app, true);
 }
@@ -3606,7 +3536,6 @@ fn toggle_main_window_internal(app: &AppHandle, capture_selection: bool) {
 
     let _ = window.set_always_on_top(true);
 
-    // 重置 hash 为翻译模式，防止之前打开过设置导致显示设置界面
     let _ = window.eval(
         "window.location.hash = ''; window.dispatchEvent(new HashChangeEvent('hashchange'));",
     );
@@ -3710,8 +3639,6 @@ fn toggle_prompt_optimizer_window(app: &AppHandle) {
     }
 }
 
-/// 恢复运行时设置
-/// 当保存设置失败时，将设置、热键、托盘等回滚到之前的状态
 fn restore_runtime_settings(app: &AppHandle, state: &State<AppState>, previous: &Settings) {
     if let Err(err) = apply_launch_at_startup(app, previous.launch_at_startup) {
         eprintln!("Failed to rollback launch-at-startup setting: {err}");
@@ -3784,7 +3711,6 @@ fn lens_register_annotated_image(
     Ok(serde_json::json!({ "success": true, "imageId": image_id }))
 }
 
-/// 清理截图临时文件：从映射中移除并删除磁盘文件
 /// 把截图自动归档到用户指定目录（best-effort，失败不阻塞主流程）
 fn archive_captured_image(app: &AppHandle, temp_path: &std::path::Path, image_id: &str) {
     let settings = app.state::<AppState>().settings_read().clone();
@@ -3914,8 +3840,6 @@ fn lens_commit_image_to_history(
     Ok(())
 }
 
-/// 从历史持久目录删除指定 image_id 对应的 PNG。
-/// 前端 history 淘汰一条记录时调用，避免目录无限增长。
 #[tauri::command]
 fn lens_delete_history_image(app: AppHandle, image_id: String) -> Result<(), String> {
     let dir = lens_history_dir(&app)?;
@@ -3955,7 +3879,6 @@ fn check_accessibility(open_if_needed: bool) -> bool {
     }
 }
 
-/// macOS 平台：检查屏幕录制权限
 #[cfg(target_os = "macos")]
 fn check_screen_recording_permission() -> bool {
     unsafe {
@@ -4007,8 +3930,6 @@ fn send_paste_shortcut() {
     }
 }
 
-/// 打开设置窗口
-/// 调整窗口大小为 640x520，取消置顶，显示并聚焦，同时通过 hash 路由切换到设置页面
 fn open_settings_window(app: &AppHandle) -> Result<(), String> {
     let window = ensure_main_window(app)?;
     let _ = window.set_always_on_top(false);
@@ -4061,8 +3982,6 @@ fn focus_lens_window(app: &AppHandle) -> bool {
     true
 }
 
-/// 自动激活 app（单实例二次启动 / Windows 普通启动默认设置页）时使用。
-/// 如果用户正在拉起 Lens，就不要再抢 main 窗口到设置页。
 fn open_settings_window_for_activation(app: &AppHandle) -> Result<(), String> {
     if lens_is_active(app) {
         let _ = focus_lens_window(app);
@@ -4085,6 +4004,13 @@ fn restart_as_administrator(app: &AppHandle) -> Result<(), String> {
 
     let exe = std::env::current_exe().map_err(|e| format!("current_exe failed: {e}"))?;
     let exe_w = wide_null(exe.as_os_str());
+    let hotkeys_released = match app.global_shortcut().unregister_all() {
+        Ok(()) => true,
+        Err(err) => {
+            eprintln!("Failed to unregister hotkeys before admin restart: {err}");
+            false
+        }
+    };
     let result = unsafe {
         ShellExecuteW(
             None,
@@ -4098,6 +4024,11 @@ fn restart_as_administrator(app: &AppHandle) -> Result<(), String> {
 
     let code = result.0 as isize;
     if code <= 32 {
+        if hotkeys_released {
+            if let Err(err) = register_hotkeys(app) {
+                eprintln!("Failed to restore hotkeys after admin restart was cancelled: {err}");
+            }
+        }
         return Err(format!("ShellExecuteW runas failed: {code}"));
     }
 
@@ -4110,7 +4041,6 @@ fn restart_as_administrator(_app: &AppHandle) -> Result<(), String> {
     Err("Restart as administrator is only supported on Windows".to_string())
 }
 
-/// 根据语言返回托盘菜单的标签文本
 fn tray_labels(
     lang: &str,
 ) -> (
@@ -4144,7 +4074,6 @@ fn tray_labels(
     }
 }
 
-/// 构建托盘菜单
 fn build_tray_menu(
     app: &AppHandle,
     settings: &Settings,
@@ -4227,8 +4156,6 @@ fn build_tray_menu(
     .map_err(|e| e.to_string())
 }
 
-/// 设置系统托盘图标和菜单
-/// 如果托盘已存在则只更新菜单；否则创建新的托盘图标并绑定菜单事件
 fn setup_tray(app: &AppHandle) -> Result<(), String> {
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
@@ -4321,8 +4248,6 @@ fn setup_tray(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// 应用入口函数
-/// 初始化 Tauri Builder，加载插件，配置窗口事件处理，设置全局状态、热键和托盘
 fn main() {
     let autostart_plugin = {
         #[cfg(target_os = "macos")]
@@ -4398,8 +4323,9 @@ fn main() {
                 apple_intelligence: apple_intelligence::AppleIntelligenceClient::new(&app.handle()),
             });
 
-            if let Err(err) = register_hotkeys(&app.handle()) {
-                eprintln!("Failed to register hotkeys: {err}");
+            let app_handle = app.handle().clone();
+            if let Err(err) = register_hotkeys(&app_handle) {
+                retry_register_hotkeys_after_startup(app_handle.clone(), err);
             }
             if let Err(err) = setup_tray(&app.handle()) {
                 eprintln!("Failed to setup tray: {err}");
@@ -4407,7 +4333,6 @@ fn main() {
 
             #[cfg(target_os = "windows")]
             {
-                // Windows 平台：如果不是通过自启动启动的，则默认打开设置窗口
                 let launched_from_autostart = std::env::args().any(|arg| arg == AUTOSTART_ARG);
                 if !launched_from_autostart {
                     let app_handle = app.handle().clone();

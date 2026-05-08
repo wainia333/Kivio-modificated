@@ -1,19 +1,10 @@
-// Tauri 前端与 Rust 后端的桥接模块
-// 所有 invoke 调用和事件监听都集中在这里，作为前后端的统一接口层
-
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { getVersion } from '@tauri-apps/api/app'
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window'
 
-// ========== 类型定义 ==========
-
-// Lens 多轮对话消息类型（视觉模型）
-// reasoning：推理模型（DeepSeek-R1 等）的思维链文本，仅本地展示，不回传后端
 export type ExplainMessage = { role: 'user' | 'assistant'; content: string; reasoning?: string }
 
-// Lens 流式输出负载（事件名 lens-stream）
-// reasoningDelta：思维链增量（推理模型才会有）
 export type LensStreamPayload = {
   imageId: string
   kind: 'answer'
@@ -24,8 +15,6 @@ export type LensStreamPayload = {
   full?: string
 }
 
-// 截图翻译流式负载（事件名 lens-translate-stream）
-// kind: 'original' = OCR 阶段；'translated' = 翻译阶段
 export type LensTranslateStreamPayload = {
   imageId: string
   kind?: 'original' | 'translated'
@@ -35,7 +24,6 @@ export type LensTranslateStreamPayload = {
   error?: string | null
 }
 
-// Lens 屏幕窗口元信息
 export type LensWindowInfo = {
   id: number
   owner: string
@@ -51,9 +39,6 @@ export type LensCursorPosition = {
   y: number
 }
 
-// AI 模型提供商配置
-// apiKeys 支持多 key failover：第一个为主 key，其余为备用 key；
-// 当某个 key 触发限流/配额/鉴权失败时后端会自动切下一个。
 export type ModelProvider = {
   id: string
   name: string
@@ -63,14 +48,12 @@ export type ModelProvider = {
   enabledModels: string[]
 }
 
-// 提供商连接测试输入（支持使用未保存的配置进行测试）
 export type ProviderConnectionInput = {
   id?: string
   baseUrl: string
   apiKeys: string[]
 }
 
-// 应用设置数据结构
 export type Settings = {
   hotkey: string
   theme: 'system' | 'light' | 'dark'
@@ -89,11 +72,8 @@ export type Settings = {
     hotkey: string
     providerId: string
     model: string
-    /** OCR method used after screenshot capture: AI vision, Baidu OCR, Chaoxing OCR, or system OCR */
     ocrMethod?: 'ai' | 'baidu' | 'chaoxing' | 'system'
-    /** Translation interface used after OCR */
     translationMethod?: 'ai' | 'baidu' | 'google' | 'tencent' | 'bing' | 'bing2' | 'yandex' | 'caiyun2' | 'microsoft'
-    /** AI text translation provider/model. Empty falls back to providerId/model */
     translateProviderId?: string
     translateModel?: string
     baiduOcr?: {
@@ -115,17 +95,10 @@ export type Settings = {
       token: string
     }
     directTranslate?: boolean
-    /** 思考模式开关（默认 false）。OCR 模型 + 翻译模型都会注入对应字段 */
     thinkingEnabled?: boolean
-    /** 思考强度（默认 medium）。仅 thinkingEnabled=true 时生效 */
     thinkingEffort?: 'low' | 'medium' | 'high' | 'xhigh'
-    /** 流式输出开关（默认 true）。OCR + 翻译两步都用 SSE，token 逐字到达 */
     streamEnabled?: boolean
-    /** 截图后是否保持全屏覆盖（默认 true）。false 时截图后窗口缩小为浮动 */
     keepFullscreenAfterCapture?: boolean
-    /** 使用系统 OCR(Apple Vision) 做文字识别,然后让 provider 翻译纯文本(默认 false)。
-     *  true 时 provider 可以是任意文字模型;false 时 provider 必须是多模态视觉模型。
-     *  Apple Intelligence 作为 provider 时自动等同于 true(其 SDK 不支持图像)。 */
     useSystemOcr?: boolean
     ocrPrompt?: string
     prompt?: string
@@ -137,17 +110,12 @@ export type Settings = {
     model?: string
     defaultLanguage?: string
     streamEnabled?: boolean
-    /** 思考模式开关（默认 true）。false 时 body 注入各厂商关闭思考的字段并集 */
     thinkingEnabled?: boolean
-    /** 思考强度（默认 medium）。仅 thinkingEnabled=true 时生效 */
     thinkingEffort?: 'low' | 'medium' | 'high' | 'xhigh'
-    /** 联网搜索开关（默认 true）。Responses API 下会添加 web_search tools */
     webSearchEnabled?: boolean
     systemPrompt?: string
     questionPrompt?: string
-    /** 消息排序：'asc' 老到新（默认），'desc' 新到老 */
     messageOrder?: 'asc' | 'desc'
-    /** 截图后是否保持全屏覆盖（默认 true）。false 时截图后窗口缩小为浮动 */
     keepFullscreenAfterCapture?: boolean
   }
   promptOptimizer: {
@@ -160,29 +128,20 @@ export type Settings = {
     optimizePrompt?: string
   }
   settingsLanguage?: 'zh' | 'en'
-  /** 启动时静默检查 GH Releases 是否有新版（默认 false） */
   autoCheckUpdate?: boolean
-  /** 截图自动归档开关（默认 false） */
   imageArchiveEnabled?: boolean
-  /** 自动归档目标目录路径 */
   imageArchivePath?: string
 }
 
-/** 更新检查结果（来自后端 GitHub Releases API 调用） */
 export type UpdateInfo = {
   available: boolean
-  /** 最新版本号（剥掉 v 前缀的 semver，如 "2.5.0"） */
   version?: string
-  /** GitHub release tag (含 v 前缀，如 "v2.5.0") */
   tag?: string
-  /** GH release 页面 URL，用于"去 GitHub 下载"按钮 */
   htmlUrl?: string
-  /** Release notes / changelog (markdown) */
   body?: string
   publishedAt?: string
 }
 
-// 默认提示词模板
 export type DefaultPromptTemplates = {
   translationTemplate: string
   screenshotOcrPrompt?: string
@@ -197,22 +156,14 @@ export type DefaultPromptTemplates = {
   }
 }
 
-// macOS 权限状态
 export type PermissionStatus = {
   platform: 'macos' | 'other'
   accessibility: boolean
   screenRecording: boolean
 }
 
-// 事件取消监听函数类型
 type Unlisten = () => void
 
-/**
- * 通用的 Tauri 事件监听包装器
- * @param event 事件名称
- * @param handler 事件处理函数
- * @returns 取消监听的函数
- */
 async function on<T>(event: string, handler: (payload: T) => void): Promise<Unlisten> {
   const unlisten = await listen<T>(event, (event) => handler(event.payload))
   return () => {
@@ -220,40 +171,31 @@ async function on<T>(event: string, handler: (payload: T) => void): Promise<Unli
   }
 }
 
-// ========== API 导出 ==========
-
 export const api = {
-  // 设置相关
   getSettings: () => invoke<Settings>('get_settings'),
   getDefaultPromptTemplates: () => invoke<DefaultPromptTemplates>('get_default_prompt_templates'),
   saveSettings: (settings: Settings) => invoke<void>('save_settings', { settings }),
   exportSettingsConfig: () => invoke<boolean>('export_settings_config'),
   importSettingsConfig: () => invoke<Settings | null>('import_settings_config'),
 
-  // 提供商相关
   fetchModels: (providerId: string, provider?: ProviderConnectionInput) =>
     invoke<string[]>('fetch_models', { providerId, provider }),
   testProviderConnection: (providerId: string, provider?: ProviderConnectionInput) =>
     invoke<{ success: boolean; error?: string }>('test_provider_connection', { providerId, provider }),
 
-  // 权限相关（macOS）
   getPermissionStatus: () => invoke<PermissionStatus>('get_permission_status'),
   openPermissionSettings: (kind: 'accessibility' | 'screen-recording') =>
     invoke<void>('open_permission_settings', { kind }),
 
-  // 应用信息
   getAppVersion: () => getVersion(),
 
-  // 文本翻译
   translateText: (text: string) => invoke<string>('translate_text', { text }),
   optimizePrompt: (text: string) => invoke<string>('optimize_prompt', { text }),
   commitTranslation: (text: string) => invoke<void>('commit_translation', { text }),
   takeTranslatorSelection: () => invoke<string>('take_translator_selection'),
 
-  // 外部链接
   openExternal: (url: string) => invoke<void>('open_external', { url }),
 
-  // 窗口控制
   resizeWindow: async (width: number, height: number) => {
     const win = getCurrentWindow()
     await win.setSize(new LogicalSize(width, height))
@@ -279,14 +221,11 @@ export const api = {
     await win.setAlwaysOnTop(alwaysOnTop)
   },
 
-  // 事件监听
   onOpenSettings: (listener: () => void) => on('open-settings', () => listener()),
 
-  // 读取截图（lens ready 态拉缩略图用）
   explainReadImage: (imageId: string) =>
     invoke<{ success: boolean; data?: string; error?: string }>('explain_read_image', { imageId }),
 
-  // Lens 模式
   onLensStream: (listener: (payload: LensStreamPayload) => void) =>
     on<LensStreamPayload>('lens-stream', (payload) => listener(payload)),
   onLensTranslateStream: (listener: (payload: LensTranslateStreamPayload) => void) =>
@@ -326,10 +265,8 @@ export const api = {
     invoke<{ success: boolean; response?: string; error?: string }>('lens_ask', { imageId, messages }),
   lensCancelStream: () => invoke<void>('lens_cancel_stream'),
   lensClose: () => invoke<void>('lens_close'),
-  // 把当前活跃 image 拷贝到 lens-history 持久目录，让重启后历史能继续提问
   lensCommitImageToHistory: (imageId: string) =>
     invoke<void>('lens_commit_image_to_history', { imageId }),
-  // 历史淘汰一条记录时调用，删除 lens-history 中对应 PNG 防止目录无限增长
   lensDeleteHistoryImage: (imageId: string) =>
     invoke<void>('lens_delete_history_image', { imageId }),
   lensSetFloating: (rect: {
@@ -352,24 +289,16 @@ export const api = {
     invoke<boolean>('lens_set_hit_region', { rect }),
   lensSetIgnoreCursorEvents: (ignore: boolean) =>
     invoke<void>('lens_set_ignore_cursor_events', { ignore }),
-  // 取走 Rust 端在 lens_request_internal 中抓到的选中文本（take 一次清一次）
   takeLensSelection: () => invoke<string>('take_lens_selection'),
 
-  // ========== 自动更新（仅检查 + 跳转，不做自动下载安装） ==========
-
-  /** 调后端 GitHub Releases API 检查最新版本 */
   checkUpdate: () => invoke<UpdateInfo>('check_github_latest_release'),
 
-  /** Apple Intelligence(端上 Foundation Models) 是否可用。仅 macOS 26+ Apple Silicon 且用户已开 Apple Intelligence 时返回 true */
   appleIntelligenceAvailable: () => invoke<boolean>('apple_intelligence_available'),
 
-  /** 下载新版本安装包到 OS temp 目录，返回本地文件路径。下载进度通过 onUpdateDownloadProgress 派发 */
   downloadUpdate: (version: string) => invoke<string>('download_update_asset', { version }),
 
-  /** 启动安装包并退出当前应用（macOS：cp 新 .app 到 /Applications + open；Windows：spawn NSIS installer） */
   installUpdate: (path: string) => invoke<void>('install_update_and_quit', { path }),
 
-  /** 下载进度事件：每次百分比变化派发一次 */
   onUpdateDownloadProgress: (
     listener: (p: { percent: number; downloadedBytes: number; totalBytes: number }) => void,
   ) => on<{ percent: number; downloadedBytes: number; totalBytes: number }>(
@@ -377,7 +306,6 @@ export const api = {
     (payload) => listener(payload),
   ),
 
-  /** 启动时若发现新版，后端 emit 此事件让 Settings UI 自动展示更新提示 */
   onUpdateAvailable: (listener: (info: UpdateInfo) => void) =>
     on<UpdateInfo>('update-available', (payload) => listener(payload)),
 }

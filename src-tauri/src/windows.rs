@@ -1,16 +1,9 @@
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
-/**
- * 获取主窗口
- */
 pub fn get_main_window(app: &AppHandle) -> Option<WebviewWindow> {
     app.get_webview_window("main")
 }
 
-/**
- * 确保主窗口存在（不存在则创建）
- * 从 tauri.conf.json 中读取主窗口配置进行创建
- */
 pub fn ensure_main_window(app: &AppHandle) -> Result<WebviewWindow, String> {
     if let Some(window) = get_main_window(app) {
         return Ok(window);
@@ -30,11 +23,6 @@ pub fn ensure_main_window(app: &AppHandle) -> Result<WebviewWindow, String> {
         .map_err(|e| e.to_string())
 }
 
-/**
- * 确保 Lens 窗口存在（不存在则创建）
- * 单 webview 三态：select 全屏 / ready 悬浮 600x72 / answering 悬浮 600x420。
- * 创建时尺寸为悬浮态默认值；后端按需要 set_size 切换。
- */
 pub fn ensure_lens_window(app: &AppHandle) -> Result<WebviewWindow, String> {
     if let Some(window) = app.get_webview_window("lens") {
         let _ = window.set_resizable(false);
@@ -61,10 +49,6 @@ pub fn ensure_lens_window(app: &AppHandle) -> Result<WebviewWindow, String> {
     Ok(window)
 }
 
-/**
- * macOS 平台特有：设置窗口在所有工作区可见
- * 确保截图窗口可以跨越桌面空间显示
- */
 #[cfg(target_os = "macos")]
 pub fn apply_macos_workspace_behavior(window: &WebviewWindow) {
     let window_for_task = window.clone();

@@ -1,19 +1,3 @@
-//! HTTP 客户端、provider 凭据解析、retry / failover、OpenAI / OpenAI 兼容模型调用与 SSE 流。
-//!
-//! 本模块对外暴露：
-//! - `ProviderConnectionInput` / `resolve_provider_credentials` —— 来自前端的 provider 临时配置或 settings.json 的解析。
-//! - `build_http_client` —— 60s 超时的 reqwest Client 构造。
-//! - `effective_retry_attempts` —— 把 settings.retry_enabled + retry_attempts 折成实际尝试次数。
-//! - `extract_status_code` / `is_failover_error` —— failover 判定（仅 401/402/403/429）。
-//! - `send_with_retry` —— 网络抖动 / 5xx / 429 退避重试。
-//! - `send_with_failover` —— 在 api_keys 列表上轮换。
-//! - `call_openai_text` / `call_openai_ocr` / `call_vision_api` —— 文本、OCR、视觉三类调用。
-//! - `call_baidu_ocr` / `call_chaoxing_ocr` / `call_baidu_translate` —— OCR 与翻译接口调用。
-//! - `call_google_translate` / `call_bing_translate` / `call_bing2_translate`
-//!   / `call_yandex_translate` / `call_microsoft_translate` —— 无密钥在线翻译接口调用。
-//! - `call_tencent_translate` / `call_caiyun2_translate` —— 腾讯云与彩云小译密钥接口调用。
-//! - `stream_chat_call` / `stream_vision_response` —— SSE 流解析。
-
 use std::{
     collections::HashSet,
     fs,
@@ -41,8 +25,6 @@ use crate::settings::{
     self, default_system_prompt, no_think_instruction, ExplainMessage, Settings,
 };
 use crate::state::AppState;
-
-// ===== Provider 凭据 =====
 
 /// 供应商连接输入参数，用于测试连接或获取模型列表时临时传入
 /// api_keys 优先；api_key 为兼容旧前端发的单 key 字段（v2.3.x 时的 ProviderConnectionInput）
@@ -103,7 +85,6 @@ pub fn resolve_provider_credentials(
     Ok((provider.base_url.clone(), provider.api_keys.clone()))
 }
 
-/// 构建 HTTP 客户端，设置 60 秒超时
 pub fn build_http_client() -> Client {
     Client::builder()
         .timeout(Duration::from_secs(60))
@@ -114,11 +95,7 @@ pub fn build_http_client() -> Client {
         })
 }
 
-// ===== Retry / Failover =====
-
-/// 重试延迟基础值（毫秒）
 const RETRY_BASE_DELAY_MS: u64 = 500;
-/// 重试延迟最大值（毫秒）
 const RETRY_MAX_DELAY_MS: u64 = 10_000;
 /// 流式模型调用允许更长时间。Responses + reasoning(high) + web_search 可能在首段最终文本前等待很久。
 const STREAM_REQUEST_TIMEOUT_SECS: u64 = 1800;
@@ -155,8 +132,6 @@ fn reqwest_error_details(error: &reqwest::Error) -> String {
     message
 }
 
-/// 获取实际的重试次数
-/// 如果重试功能被禁用，则返回 1（即只尝试一次）
 pub fn effective_retry_attempts(settings: &Settings) -> usize {
     if settings.retry_enabled {
         settings.retry_attempts as usize
@@ -165,7 +140,6 @@ pub fn effective_retry_attempts(settings: &Settings) -> usize {
     }
 }
 
-/// 从响应头中解析 Retry-After 值（秒），转换为毫秒延迟
 fn parse_retry_after(headers: &HeaderMap) -> Option<u64> {
     headers
         .get("retry-after")
@@ -173,20 +147,14 @@ fn parse_retry_after(headers: &HeaderMap) -> Option<u64> {
         .and_then(|value| value.parse::<u64>().ok())
 }
 
-/// 判断 HTTP 状态码是否可重试
-/// 包括 429（限流）和所有服务器错误（5xx）
 fn is_retryable_status(status: StatusCode) -> bool {
     status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
 }
 
-/// 判断请求错误是否可重试
-/// 包括超时和连接错误
 fn is_retryable_error(error: &reqwest::Error) -> bool {
     error.is_timeout() || error.is_connect()
 }
 
-/// 计算重试延迟
-/// 优先使用服务器返回的 Retry-After 头；否则使用指数退避策略
 fn retry_delay_ms(attempt: usize, retry_after: Option<u64>) -> u64 {
     if let Some(seconds) = retry_after {
         return seconds.saturating_mul(1000);
@@ -360,8 +328,6 @@ where
         .map(|msg| format!("{} (attempt {}/{})", msg, attempts, attempts))
         .unwrap_or_else(|| format!("{} Error: exceeded retry attempts ({})", label, attempts)))
 }
-
-// ===== OpenAI / Chat completion 调用 =====
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ModelEndpointKind {
@@ -852,8 +818,6 @@ fn responses_stream_error(value: &serde_json::Value) -> String {
         .collect()
 }
 
-/// 调用 OpenAI 兼容的文本聊天接口
-/// 发送单轮 user 消息，temperature 设为 0.2,返回模型生成的文本内容
 pub async fn call_openai_text(
     state: &State<'_, AppState>,
     config: &settings::ModelProvider,
@@ -937,8 +901,6 @@ pub async fn call_openai_text(
     Ok(content.trim().to_string())
 }
 
-/// 调用 OpenAI 兼容的 OCR/视觉接口
-/// 将图片转为 Base64 后作为 image_url 类型内容发送，temperature 设为 0 以提高识别稳定性
 pub async fn call_openai_ocr(
     state: &State<'_, AppState>,
     config: &settings::ModelProvider,
@@ -1189,7 +1151,6 @@ async fn baidu_ocr_access_token(
     Ok(token)
 }
 
-/// 调用百度智能云文字识别接口。
 pub async fn call_baidu_ocr(
     state: &State<'_, AppState>,
     config: &settings::BaiduOcrConfig,
@@ -1318,7 +1279,6 @@ fn chaoxing_ocr_lines(value: &serde_json::Value) -> Vec<String> {
     lines
 }
 
-/// 调用学习通 OCR 接口。
 pub async fn call_chaoxing_ocr(
     state: &State<'_, AppState>,
     image_path: &Path,
@@ -1986,7 +1946,6 @@ pub async fn call_baidu_tts_data_url(
     ))
 }
 
-/// 调用百度翻译开放平台。
 pub async fn call_baidu_translate(
     state: &State<'_, AppState>,
     config: &settings::BaiduTranslateConfig,
@@ -2234,7 +2193,6 @@ pub async fn call_bing2_translate(
     parse_bing_translation(&raw, "Bing2 Translate")
 }
 
-/// 调用腾讯云机器翻译 TextTranslate。
 pub async fn call_tencent_translate(
     state: &State<'_, AppState>,
     config: &settings::TencentTranslateConfig,
@@ -2374,7 +2332,6 @@ pub async fn call_yandex_translate(
         })
 }
 
-/// 调用彩云小译 2 密钥版接口。
 pub async fn call_caiyun2_translate(
     state: &State<'_, AppState>,
     config: &settings::CaiyunTranslateConfig,
@@ -2439,7 +2396,6 @@ pub async fn call_caiyun2_translate(
     ))
 }
 
-/// 调用 Microsoft Translator 接口。
 pub async fn call_microsoft_translate(
     state: &State<'_, AppState>,
     text: &str,
@@ -2576,7 +2532,6 @@ pub async fn call_microsoft_translate(
     Ok(translated.trim().to_string())
 }
 
-/// 调用视觉 API（截图解释 / Lens 共用）
 /// 支持流式输出：如果 stream 为 true，通过 stream_vision_response 逐段 emit `event_name` 事件。
 /// `provider_id_override` 非空时使用指定 provider/model（用于 lens 选择独立模型）；空则走 explain 配置。
 #[allow(clippy::too_many_arguments)]
@@ -2837,8 +2792,6 @@ pub async fn call_vision_api(
 
     Ok(content.trim().to_string())
 }
-
-// ===== SSE 流 =====
 
 fn stream_text_suffix(full: &str, text: &str) -> String {
     if text.is_empty() {
@@ -3600,11 +3553,8 @@ mod tests {
         );
     }
 
-    // ===== extract_status_code =====
-
     #[test]
     fn extract_status_code_parses_typical_send_with_retry_format() {
-        // send_with_retry 拼出来的标准格式
         let s = "OpenAI API Error: 429 Too Many Requests - {\"error\":\"rate_limit\"}";
         assert_eq!(extract_status_code(s), Some(429));
     }
@@ -3659,7 +3609,6 @@ mod tests {
 
     #[test]
     fn extract_status_code_returns_none_for_network_error() {
-        // reqwest::Error 路径无前导数字
         let s = "Stream chat Error: error sending request: connection refused (attempt 3/3)";
         assert_eq!(extract_status_code(s), None);
     }
@@ -3669,8 +3618,6 @@ mod tests {
         assert_eq!(extract_status_code("just some message"), None);
         assert_eq!(extract_status_code(""), None);
     }
-
-    // ===== is_failover_error =====
 
     #[test]
     fn is_failover_error_only_triggers_on_auth_quota_codes() {
@@ -3684,10 +3631,8 @@ mod tests {
 
     #[test]
     fn is_failover_error_does_not_trigger_on_400_or_5xx() {
-        // 400 是请求 body 问题，不应换 key
         assert!(!is_failover_error("X Error: 400 Bad Request - body"));
         assert!(!is_failover_error("Stream HTTP 400: bad request"));
-        // 500 由 send_with_retry 内部退避重试，不应到 failover 层
         assert!(!is_failover_error(
             "X Error: 500 Internal Server Error - body"
         ));
@@ -3698,7 +3643,6 @@ mod tests {
 
     #[test]
     fn is_failover_error_does_not_trigger_on_network_failure() {
-        // 网络问题不是 key 的锅
         assert!(!is_failover_error(
             "Stream Error: error sending request: timed out"
         ));
@@ -3707,7 +3651,6 @@ mod tests {
 
     #[test]
     fn is_failover_error_does_not_trigger_on_body_keywords_alone() {
-        // 旧版宽泛匹配 body 含 "billing" / "quota" 会误触发；现版严格按状态码
         assert!(!is_failover_error(
             "X Error: 400 - {\"message\":\"billing issue\"}"
         ));

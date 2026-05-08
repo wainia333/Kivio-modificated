@@ -1,6 +1,3 @@
-// 剪贴板复制工具：优先 navigator.clipboard，失败回退到 document.execCommand。
-// 抽离自 ScreenshotResult.tsx 的 tryLegacyCopy + handleCopy。
-
 function tryLegacyCopy(text: string): boolean {
   const textarea = document.createElement('textarea')
   textarea.value = text

@@ -2,16 +2,11 @@ use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 use tauri_plugin_store::StoreBuilder;
 
-// 设置存储文件名
 const SETTINGS_STORE: &str = "settings.json";
-// 系统钥匙串服务名（用于安全存储 API Key）
 const KEYRING_SERVICE: &str = "com.zmair.kivio";
 // 旧版 service 名（v2.4.5 之前为 com.zmair.keylingo），仅用于 legacy 读 + 清理
 const KEYRING_SERVICE_LEGACY: &str = "com.zmair.keylingo";
 
-/**
- * 生成提供商 API Key 在钥匙串中的条目名称
- */
 fn provider_credential_name(provider_id: &str) -> String {
     format!("provider:{provider_id}")
 }
@@ -85,11 +80,6 @@ fn migrate_legacy_keyring_keys(settings: &mut Settings) {
     settings.legacy_keyring_migrated = true;
 }
 
-// ========== 数据结构定义 ==========
-
-/**
- * 旧版 OpenAI 配置（用于迁移兼容）
- */
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct OpenAIConfig {
@@ -136,10 +126,6 @@ pub struct ModelProvider {
     pub enabled_models: Vec<String>,
 }
 
-/**
- * 百度 OCR 配置。
- * API Key / Secret Key 对应百度智能云文字识别应用；默认走通用文字识别。
- */
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct BaiduOcrConfig {
@@ -164,9 +150,6 @@ impl Default for BaiduOcrConfig {
     }
 }
 
-/**
- * 百度翻译开放平台配置。
- */
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct BaiduTranslateConfig {
@@ -188,9 +171,6 @@ impl Default for BaiduTranslateConfig {
     }
 }
 
-/**
- * 腾讯云机器翻译配置。
- */
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct TencentTranslateConfig {
@@ -209,9 +189,6 @@ impl Default for TencentTranslateConfig {
     }
 }
 
-/**
- * 彩云小译 2 配置。
- */
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct CaiyunTranslateConfig {
@@ -227,9 +204,6 @@ impl Default for CaiyunTranslateConfig {
     }
 }
 
-/**
- * 截图翻译功能配置
- */
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ScreenshotTranslationConfig {
@@ -319,9 +293,6 @@ impl Default for ScreenshotTranslationConfig {
     }
 }
 
-/**
- * 对话消息（Lens 多轮对话）
- */
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExplainMessage {
@@ -329,10 +300,6 @@ pub struct ExplainMessage {
     pub content: String,
 }
 
-/**
- * Lens 模式配置
- * 启用后可通过热键进入：屏幕高亮选择窗口/区域 → 截图 → 在悬浮对话栏内提问。
- */
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct LensConfig {
@@ -399,9 +366,6 @@ impl Default for LensConfig {
     }
 }
 
-/**
- * 提示词优化器配置
- */
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct PromptOptimizerConfig {
@@ -437,9 +401,6 @@ impl Default for PromptOptimizerConfig {
     }
 }
 
-/**
- * 应用完整设置
- */
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
@@ -483,10 +444,8 @@ pub struct Settings {
     /// 仅做"提示 + 跳转 GH 下载页"，不集成 auto-installer，避免签名密钥那套
     #[serde(default = "default_false")]
     pub auto_check_update: bool,
-    /// 截图自动归档开关（默认 false）
     #[serde(default = "default_false")]
     pub image_archive_enabled: bool,
-    /// 自动归档目标目录路径（空字符串表示未设置）
     #[serde(default)]
     pub image_archive_path: String,
     // 旧版字段，用于迁移
@@ -495,9 +454,6 @@ pub struct Settings {
 }
 
 impl Settings {
-    /**
-     * 根据 ID 查找提供商
-     */
     pub fn get_provider(&self, id: &str) -> Option<&ModelProvider> {
         self.providers.iter().find(|p| p.id == id)
     }
@@ -531,18 +487,7 @@ impl Default for Settings {
     }
 }
 
-/**
- * 设置数据清理与迁移
- *
- * 执行以下操作：
- * 1. 从旧版单提供商配置迁移到多提供商体系
- * 2. 确保空字段有默认值
- * 3. 确保当前使用的模型在 enabled_models 中
- * 4. 规范化快捷键字符串
- * 5. 确保必要字段不为空
- */
 pub fn sanitize_settings(mut settings: Settings) -> Settings {
-    // 1. 从旧版配置迁移
     if settings.providers.is_empty() {
         // 迁移翻译提供商
         if let Some(old_openai) = settings.openai.take() {
@@ -603,7 +548,6 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
         });
     }
 
-    // 2. 为空字段设置默认值
     if settings.translator_model.is_empty() {
         settings.translator_model = "gpt-4o".to_string();
     }
@@ -632,7 +576,8 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
             | "caiyun2"
             | "microsoft"
     ) {
-        settings.screenshot_translation.translation_method = default_screenshot_translation_method();
+        settings.screenshot_translation.translation_method =
+            default_screenshot_translation_method();
     }
     if settings
         .screenshot_translation
@@ -790,10 +735,8 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
             };
     }
 
-    // 3. 确保当前使用的模型在 enabled_models 列表中
     for provider in &mut settings.providers {
         if provider.enabled_models.is_empty() {
-            // 如果该提供商被某个功能使用，添加对应模型
             if settings.translator_provider_id == provider.id {
                 provider
                     .enabled_models
@@ -840,13 +783,11 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
                     .enabled_models
                     .push(settings.prompt_optimizer.model.clone());
             }
-            // 如果仍然为空，添加默认模型
             if provider.enabled_models.is_empty() {
                 provider.enabled_models.push("gpt-4o".to_string());
             }
         }
 
-        // 确保当前使用的模型确实在该 provider 的 enabled_models 中
         if settings.translator_provider_id == provider.id
             && !provider.enabled_models.contains(&settings.translator_model)
         {
@@ -901,7 +842,6 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
         settings.translator_model = settings.screenshot_translation.translate_model.clone();
     }
 
-    // 4. 规范化快捷键字符串
     settings.hotkey = normalize_hotkey(&settings.hotkey);
     settings.screenshot_translation.hotkey =
         normalize_hotkey(&settings.screenshot_translation.hotkey);
@@ -922,7 +862,6 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
     // 更新检查入口已隐藏，运行时也强制保持关闭。
     settings.auto_check_update = false;
 
-    // 规范化提示词（去除首尾空白，空值转为 None）
     settings.translator_prompt = normalize_optional_prompt(settings.translator_prompt.take());
     settings.screenshot_translation.ocr_prompt =
         normalize_optional_prompt(settings.screenshot_translation.ocr_prompt.take());
@@ -938,7 +877,6 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
         .trim()
         .to_string();
 
-    // 5. 确保必要字段不为空
     if settings.hotkey.is_empty() {
         settings.hotkey = default_hotkey();
     }
@@ -955,7 +893,6 @@ pub fn sanitize_settings(mut settings: Settings) -> Settings {
         settings.lens.message_order = "asc".to_string();
     }
 
-    // 清理归档目录路径（去除首尾空白）
     settings.image_archive_path = settings.image_archive_path.trim().to_string();
 
     settings.retry_attempts = clamp_retry_attempts(settings.retry_attempts);
@@ -1072,13 +1009,6 @@ pub fn load_settings(app: &AppHandle) -> Settings {
     sanitized
 }
 
-// ========== 默认提示词生成 ==========
-
-/**
- * 获取默认系统提示词
- * has_image=true 时为视觉助手；为 false 时为通用对话助手（不假设有图片）
- * 风格统一：简短直答、无小标题、思考过程尽量精简
- */
 pub fn default_system_prompt(language: &str, has_image: bool) -> String {
     match (language.starts_with("zh"), has_image) {
     (true, true) => "你是一位智能助手，能够看到用户分享的截图。请将其作为视觉上下文来理解和回答，可以涉及信息提取、概念解释、操作协助或任何相关话题。保持回答简洁直接，自然流畅，不用小标题和编号。数学公式用 LaTeX（$...$ 或 $$...$$）。思考保持简洁，避免反复重述。".to_string(),
@@ -1101,10 +1031,6 @@ pub fn no_think_instruction(language: &str) -> &'static str {
     }
 }
 
-/**
- * 获取默认问答提示词
- * has_image=true 时让模型聚焦图片内容；has_image=false 时返回空串（不附加前缀，直接传用户原话）
- */
 pub fn default_question_prompt(language: &str, has_image: bool) -> String {
     if !has_image {
         return String::new();
@@ -1116,8 +1042,6 @@ pub fn default_question_prompt(language: &str, has_image: bool) -> String {
             .to_string()
     }
 }
-
-// ========== 默认值辅助函数 ==========
 
 fn default_true() -> bool {
     true
@@ -1208,9 +1132,6 @@ fn clamp_retry_attempts(value: u8) -> u8 {
     value.clamp(1, 5)
 }
 
-/**
- * 规范化可选提示词：去除空白，空字符串转为 None
- */
 fn normalize_optional_prompt(value: Option<String>) -> Option<String> {
     value.and_then(|v| {
         let trimmed = v.trim();
@@ -1222,9 +1143,6 @@ fn normalize_optional_prompt(value: Option<String>) -> Option<String> {
     })
 }
 
-/**
- * 规范化快捷键字符串：去除各部分首尾空白并过滤空部分
- */
 fn normalize_hotkey(value: &str) -> String {
     value
         .split('+')
@@ -1248,8 +1166,6 @@ fn normalize_hotkey(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ===== normalize_hotkey =====
 
     #[test]
     fn normalize_hotkey_canonicalizes_aliases() {
@@ -1290,8 +1206,6 @@ mod tests {
         assert_eq!(normalize_hotkey("cmd+F1"), "CommandOrControl+F1");
         assert_eq!(normalize_hotkey("ctrl+Backspace"), "Control+Backspace");
     }
-
-    // ===== sanitize_settings =====
 
     #[test]
     fn default_settings_use_chaoxing_ocr_and_microsoft_translate() {

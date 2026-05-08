@@ -26,10 +26,6 @@ interface SettingsProps {
   onSettingsChange: () => void
 }
 
-/**
- * 设置面板主组件
- * 提供基础设置、翻译设置、截图设置、模型管理四大标签页
- */
 export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
   const [settings, setSettings] = useState<SettingsData | null>(null)
   const [initialSettingsSnapshot, setInitialSettingsSnapshot] = useState('')
@@ -49,10 +45,7 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
   const [providerTestFeedback, setProviderTestFeedback] = useState<Record<string, { ok: boolean; message: string }>>({})
   const [configTransferBusy, setConfigTransferBusy] = useState<null | 'export' | 'import'>(null)
   const [successMessage, setSuccessMessage] = useState('')
-  // Apple Intelligence sidecar 可用性：mount 时查一次,unavailable 就把 onDevice 预设 chip 隐藏
   const [appleIntelligenceAvailable, setAppleIntelligenceAvailable] = useState(false)
-  // 加载失败时的错误信息；非空则渲染错误 UI 而不是用合成默认值进入正常视图
-  // （否则用户可能没察觉就 Save 把磁盘真实数据覆盖掉）
   const [loadError, setLoadError] = useState('')
   const [reloadKey, setReloadKey] = useState(0)
   const saveSuccessTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -76,11 +69,8 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
     { value: 'high', label: t.thinkingEffortHigh },
     { value: 'xhigh', label: t.thinkingEffortXHigh },
   ]
-  // 判断是否有未保存的更改
   const hasUnsavedChanges = settings ? JSON.stringify(settings) !== initialSettingsSnapshot : false
 
-  // 初始化：加载设置、版本号、默认提示词
-  // 重试通过递增 reloadKey 触发本 effect 重跑
   useEffect(() => {
     let active = true
     setLoading(true)
@@ -95,8 +85,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
       .catch((err) => {
         if (!active) return
         console.error('Failed to load settings:', err)
-        // 不合成默认值：避免用户在错误状态下 Save 把磁盘真实数据覆盖掉
-        // 渲染分支会根据 loadError 显示重试 UI
         const message = err instanceof Error ? err.message : String(err)
         setLoadError(message || 'Unknown error')
         setLoading(false)
@@ -115,15 +103,11 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
       .catch((err) => {
         console.error('Failed to load default prompt templates:', err)
       })
-    // resizeWindow 已在 App.tsx 中处理，此处不再重复调用
     return () => {
       active = false
     }
   }, [reloadKey])
 
-  /**
-   * 刷新权限状态（macOS）
-   */
   const refreshPermissions = useCallback(async () => {
     setPermissionsLoading(true)
     try {
@@ -140,7 +124,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
     refreshPermissions()
   }, [refreshPermissions])
 
-  // 查 Apple Intelligence 可用性(macOS 26 + Apple Silicon + 已开启 → true)，决定预设 chip 是否露出
   useEffect(() => {
     let cancelled = false
     api.appleIntelligenceAvailable()
@@ -182,9 +165,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
     }, 2200)
   }, [])
 
-  /**
-   * 保存设置
-   */
   const handleSave = useCallback(async () => {
     if (!settings) return false
     try {
@@ -270,9 +250,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
     }
   }, [])
 
-  /**
-   * 请求关闭设置页（检查未保存更改）
-   */
   const handleCloseRequest = useCallback(() => {
     if (recordingTarget) return
     if (hasUnsavedChanges) {
@@ -282,13 +259,11 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
     onClose()
   }, [hasUnsavedChanges, onClose, recordingTarget])
 
-  // 放弃更改并关闭
   const handleDiscardAndClose = () => {
     setCloseConfirmOpen(false)
     onClose()
   }
 
-  // 保存并关闭
   const handleSaveAndClose = async () => {
     const saved = await handleSave()
     if (saved) {
@@ -297,7 +272,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
     }
   }
 
-  // Esc 键关闭（带未保存提示）
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (recordingTarget) return
@@ -309,9 +283,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
     return () => window.removeEventListener('keydown', handler)
   }, [handleCloseRequest, recordingTarget])
 
-  /**
-   * 测试提供商连接
-   */
   const handleTestConnection = async (providerId: string) => {
     setTestingProviderId(providerId)
     setProviderTestFeedback((prev) => {
@@ -347,9 +318,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
     }
   }
 
-  /**
-   * 打开 macOS 系统权限设置
-   */
   const handleOpenPermissionSettings = async (kind: 'accessibility' | 'screen-recording') => {
     try {
       await api.openPermissionSettings(kind)
@@ -358,7 +326,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
     }
   }
 
-  // 重试次数输入处理
   const handleRetryAttemptsChange = (value: string) => {
     if (!settings) return
     setRetryAttemptsInput(value)
@@ -387,9 +354,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
     }
   }
 
-  /**
-   * 更新设置字段
-   */
   const updateSettings = useCallback((updates: Partial<SettingsData>) => {
     setSettings((prev) => {
       if (!prev) return prev
@@ -397,9 +361,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
     })
   }, [])
 
-  /**
-   * 更新指定提供商配置
-   */
   const updateProvider = (id: string, updates: Partial<ModelProvider>) => {
     setSettings((prev) => {
       if (!prev) return prev
@@ -410,9 +371,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
     })
   }
 
-  /**
-   * 添加新提供商
-   */
   const addProvider = () => {
     if (!settings) return
     const newId = `provider-${Date.now()}`
@@ -430,14 +388,12 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
     })
   }
 
-  /** 用预设一键添加 provider —— baseUrl 和默认模型已填好，用户只需填 API key */
   const addProviderFromPreset = (preset: ProviderPreset) => {
     if (!settings) return
     const newId = `provider-${Date.now()}`
     const newProvider: ModelProvider = {
       id: newId,
       name: preset.name,
-      // 端上 provider(Apple Intelligence)不需 API key,填一个哨兵字符串绕开"Missing API Key"检查
       apiKeys: preset.onDevice ? ['__on_device__'] : [],
       baseUrl: preset.baseUrl,
       availableModels: [...preset.defaultModels],
@@ -449,26 +405,16 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
     })
   }
 
-  /**
-   * 根据 ID 查找提供商（找不到则返回第一个）
-   */
   const resolveProvider = (providers: ModelProvider[], providerId: string) => {
     return providers.find(p => p.id === providerId) ?? providers[0]
   }
 
-  /**
-   * 确保当前模型在已启用模型列表中
-   */
   const resolveModel = (provider: ModelProvider | undefined, currentModel: string) => {
     if (!provider) return currentModel
     if (provider.enabledModels.includes(currentModel)) return currentModel
     return provider.enabledModels[0] || currentModel
   }
 
-  /**
-   * 删除提供商
-   * 删除后会自动将使用该提供商的功能切换到第一个可用提供商
-   */
   const deleteProvider = (id: string) => {
     if (!settings) return
     const nextProviders = settings.providers.filter(p => p.id !== id)
@@ -478,7 +424,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
     const screenshotTranslateProvider = screenshotHadOwnTranslateProvider
       ? resolveProvider(nextProviders, settings.screenshotTranslation?.translateProviderId || '')
       : undefined
-    // lens providerId 为空表示 fallback 到 translator，删除时若已设置自身 provider 才需要级联
     const lensHadOwnProvider = !!settings.lens?.providerId
     const lensProvider = lensHadOwnProvider
       ? resolveProvider(nextProviders, settings.lens?.providerId || '')
@@ -517,9 +462,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
     })
   }
 
-  /**
-   * 添加已启用模型
-   */
   const addEnabledModel = (providerId: string, model: string) => {
     if (!settings || !model.trim()) return
     const provider = settings.providers.find(p => p.id === providerId)
@@ -529,10 +471,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
     })
   }
 
-  /**
-   * 移除已启用模型
-   * 移除后会自动更新使用该模型的功能到新的默认模型
-   */
   const removeEnabledModel = (providerId: string, model: string) => {
     if (!settings) return
     const provider = settings.providers.find((p) => p.id === providerId)
@@ -595,9 +533,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
   const [fetchingProviderId, setFetchingProviderId] = useState<string | null>(null)
   const [manualInputs, setManualInputs] = useState<Record<string, string>>({})
 
-  /**
-   * 从提供商 API 获取可用模型列表
-   */
   const fetchModels = async (providerId: string) => {
     if (!settings || fetchingProviderId) return
     setFetchingProviderId(providerId)
@@ -620,9 +555,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
     }
   }
 
-  /**
-   * 更新截图翻译配置
-   */
   const updateScreenshotTranslation = useCallback((updates: Partial<SettingsData['screenshotTranslation']>) => {
     setSettings((prev) => {
       if (!prev) return prev
@@ -673,9 +605,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
     })
   }, [])
 
-  /**
-   * 更新 Lens 配置
-   */
   const updateLens = useCallback((updates: Partial<SettingsData['lens']>) => {
     setSettings((prev) => {
       if (!prev) return prev
@@ -697,9 +626,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
     })
   }, [])
 
-  /**
-   * 更新提示词优化配置
-   */
   const updatePromptOptimizer = useCallback((updates: Partial<SettingsData['promptOptimizer']>) => {
     setSettings((prev) => {
       if (!prev) return prev
@@ -716,14 +642,10 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
     })
   }, [])
 
-  /**
-   * 切换快捷键录制状态
-   */
   const toggleRecording = (target: 'main' | 'screenshotTranslation' | 'lens' | 'promptOptimizer') => {
     setRecordingTarget((current) => (current === target ? null : target))
   }
 
-  // 当前语言对应的默认 lens 提示词
   const lensDefaults = defaultPrompts?.lensPrompts?.[settings?.lens?.defaultLanguage === 'en' ? 'en' : 'zh']
   const promptOptimizerDefaults = defaultPrompts?.promptOptimizerPrompts?.[settings?.promptOptimizer?.defaultLanguage === 'en' ? 'en' : 'zh']
   const modelPairOptions = settings?.providers.flatMap(p =>
@@ -784,7 +706,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
     })
   }
 
-  // 快捷键录制监听
   useEffect(() => {
     if (!recordingTarget) return
     const handler = (e: KeyboardEvent) => {
@@ -820,7 +741,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
   }
 
   if (loadError || !settings) {
-    // 加载失败：显示错误 + 重试按钮，禁止用户在不知情的情况下用合成默认值 Save 覆盖磁盘
     return (
       <div className="flex items-center justify-center h-full bg-neutral-200 dark:bg-black p-6">
         <div className="max-w-sm w-full bg-white dark:bg-[#1C1C1E] rounded-xl shadow-sm border border-black/5 dark:border-white/5 p-5 text-center">
@@ -856,14 +776,11 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
 
   return (
     <div className="flex bg-[#fafafa] dark:bg-black text-neutral-900 dark:text-neutral-100 font-sans rounded-xl border border-black/5 dark:border-white/10 shadow-none overflow-hidden h-full w-full">
-      {/* 左侧侧边栏 */}
       <div className="w-[180px] flex flex-col border-r border-black/[0.04] dark:border-white/[0.05] bg-white dark:bg-[#1C1C1E] shrink-0">
-        {/* 标题 */}
         <div className="px-5 py-4" data-tauri-drag-region>
           <h2 className="font-semibold text-[14px] tracking-tight text-neutral-900 dark:text-neutral-100">{t.settings}</h2>
         </div>
 
-        {/* 导航项 */}
         <nav className="flex-1 px-2.5 space-y-0.5">
           {[
             { id: 'general' as const, label: t.tabGeneral, icon: SettingsIcon },
@@ -895,9 +812,7 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
 
       </div>
 
-      {/* 右侧内容区域 */}
       <div className="flex-1 flex flex-col min-w-0">
-        {/* 顶部关闭按钮 */}
         <div className="flex justify-end px-4 pt-3" data-tauri-drag-region>
           <button
             onClick={handleCloseRequest}
@@ -907,12 +822,9 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
             <X size={16} strokeWidth={2} />
           </button>
         </div>
-        {/* 内容滚动区 */}
         <div className="flex-1 overflow-auto px-5 py-2 space-y-5 custom-scrollbar">
-        {/* ===== 基础设置标签页 ===== */}
         {activeTab === 'general' && (
           <div className="space-y-8 animate-in fade-in slide-in-from-bottom-2 duration-300">
-            {/* 配置迁移 */}
             <section>
               <SectionTitle icon={FileText}>{t.configMigration}</SectionTitle>
               <div className="settings-card overflow-hidden">
@@ -943,7 +855,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
               </div>
             </section>
 
-            {/* 外观 */}
             <section>
               <SectionTitle icon={Palette}>{lang === 'zh' ? '外观' : 'Appearance'}</SectionTitle>
               <div className="settings-card overflow-hidden divide-y divide-black/[0.04] dark:divide-white/[0.05]">
@@ -973,7 +884,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
               </div>
             </section>
 
-            {/* 行为 */}
             <section>
               <SectionTitle icon={SlidersHorizontal}>{lang === 'zh' ? '行为' : 'Behavior'}</SectionTitle>
               <div className="settings-card overflow-hidden divide-y divide-black/[0.04] dark:divide-white/[0.05]">
@@ -1012,7 +922,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
               </div>
             </section>
 
-            {/* 截图自动归档 */}
             <section>
               <SectionTitle icon={Camera}>{t.imageArchive}</SectionTitle>
               <div className="settings-card overflow-hidden divide-y divide-black/[0.04] dark:divide-white/[0.05]">
@@ -1055,7 +964,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
               </div>
             </section>
 
-            {/* 权限状态（仅 macOS 显示） */}
             {permissionStatus?.platform === 'macos' && (
               <section>
                 <SectionTitle icon={ShieldCheck}>{t.permissions}</SectionTitle>
@@ -1097,10 +1005,8 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
           </div>
         )}
 
-        {/* ===== 翻译设置标签页 ===== */}
         {activeTab === 'translate' && (
           <div className="space-y-8 animate-in fade-in slide-in-from-bottom-2 duration-300">
-            {/* 快捷键 */}
             <section>
               <SectionTitle icon={Keyboard}>{t.hotkey}</SectionTitle>
               <div className="settings-card overflow-hidden px-4 py-3">
@@ -1116,7 +1022,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
               </div>
             </section>
 
-            {/* 目标语言 */}
             <section>
               <SectionTitle icon={Globe}>{t.targetLang}</SectionTitle>
               <div className="settings-card overflow-hidden">
@@ -1140,7 +1045,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
               </div>
             </section>
 
-            {/* 翻译引擎 */}
             <section>
               <SectionTitle icon={Cpu}>{t.engine}</SectionTitle>
               <div className="settings-card overflow-hidden divide-y divide-black/[0.04] dark:divide-white/[0.05]">
@@ -1232,7 +1136,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
               </div>
             </section>
 
-            {/* 提示词 */}
             <section>
               <SectionTitle icon={FileText}>{t.translatorPrompt}</SectionTitle>
               <div className="settings-card overflow-hidden px-4 py-3">
@@ -1250,7 +1153,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
           </div>
         )}
 
-        {/* ===== 截图设置标签页 ===== */}
         {activeTab === 'screenshot' && (
           <div className="space-y-7 animate-in fade-in slide-in-from-bottom-2 duration-300">
             <section>
@@ -1553,7 +1455,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
           </div>
         )}
 
-        {/* ===== Lens 标签页 ===== */}
         {activeTab === 'lens' && (
           <div className="space-y-8 animate-in fade-in slide-in-from-bottom-2 duration-300">
             <section>
@@ -1698,7 +1599,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
           </div>
         )}
 
-        {/* ===== 提示词优化标签页 ===== */}
         {activeTab === 'promptOptimizer' && (
           <div className="space-y-8 animate-in fade-in slide-in-from-bottom-2 duration-300">
             <section>
@@ -1798,17 +1698,13 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
           </div>
         )}
 
-        {/* ===== 模型管理标签页 ===== */}
         {activeTab === 'providers' && (
           <div className="space-y-8 animate-in fade-in slide-in-from-bottom-2 duration-300">
             {settings.providers.map((provider) => {
-              // 端上 provider(Apple Intelligence)：不需 baseURL/API Key/连接测试/可用模型 fetch，
-              // 这些字段对用户毫无意义,渲染时全部隐藏。
               const isOnDevice = provider.baseUrl === 'applefoundation://local'
               return (
               <section key={provider.id} className="relative">
                 <div className="settings-card overflow-hidden">
-                  {/* 卡头：状态点 + 名称输入 + 删除按钮（始终可见） */}
                   <div className="flex items-center gap-2.5 px-4 py-2.5 border-b border-black/[0.04] dark:border-white/[0.05] bg-black/[0.012] dark:bg-white/[0.018]">
                     <span className={`shrink-0 w-1.5 h-1.5 rounded-full ${
                       isOnDevice
@@ -1838,7 +1734,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
                   </div>
 
                   <div className="divide-y divide-black/[0.04] dark:divide-white/[0.05]">
-                    {/* Base URL — 端上 provider(Apple Intelligence)用哨兵 baseURL,无展示价值,隐藏 */}
                     {!isOnDevice && (
                     <div className="px-4 py-3">
                       <Label>{t.baseUrl}</Label>
@@ -1856,7 +1751,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
                     </div>
                     )}
 
-                    {/* API Keys — 端上 provider 不需 key,隐藏 */}
                     {!isOnDevice && (
                     <div className="px-4 py-3">
                       <div className="flex items-center justify-between">
@@ -1916,7 +1810,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
                     </div>
                     )}
 
-                    {/* 连接测试 — 端上 provider 不走 HTTP,无连接可测,隐藏 */}
                     {!isOnDevice && (
                     <div className="flex items-center justify-between gap-3 px-4 py-3">
                       <button
@@ -1943,7 +1836,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
                     </div>
                     )}
 
-                    {/* 已启用模型 */}
                     <div className="px-4 py-3 space-y-2.5">
                       <div className="flex justify-between items-center gap-2">
                         <Label className="!mb-0">{t.registeredModels}</Label>
@@ -1993,7 +1885,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
                       </div>
                     </div>
 
-                    {/* 可用模型 — 端上 provider 没有 /models 端点,fetch 无意义,隐藏 */}
                     {!isOnDevice && (
                     <div className="px-4 py-3 space-y-2">
                       <div className="flex justify-between items-center">
@@ -2037,7 +1928,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
               )
             })}
 
-            {/* 快速预设 chip + 自定义按钮 */}
             <section>
               <SectionTitle icon={Plus}>{lang === 'zh' ? '添加提供商' : 'Add Provider'}</SectionTitle>
               <div className="space-y-2">
@@ -2074,7 +1964,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
           </div>
         )}
 
-        {/* ===== 关于标签页 ===== */}
         {activeTab === 'about' && (
           <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
             <section>
@@ -2121,7 +2010,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
         )}
       </div>
 
-      {/* 底部操作栏 */}
       <div className="flex justify-between items-center px-5 py-3 border-t border-black/[0.04] dark:border-white/[0.05] bg-white dark:bg-[#1C1C1E] shrink-0">
         <div className="flex items-center gap-3 min-w-0">
           <span className="text-[10px] font-medium text-neutral-400 dark:text-neutral-500 tracking-wide">v{appVersion}</span>
@@ -2161,7 +2049,6 @@ export default function Settings({ onClose, onSettingsChange }: SettingsProps) {
         </div>
       </div>
 
-      {/* 未保存更改确认弹窗 */}
       {closeConfirmOpen && (
         <div className="absolute inset-0 z-50 bg-black/30 backdrop-blur-[1px] flex items-center justify-center p-4" data-tauri-drag-region="false">
           <div className="w-full max-w-[320px] rounded-xl border border-black/10 dark:border-white/10 bg-white dark:bg-neutral-900 shadow-lg p-4 space-y-3">

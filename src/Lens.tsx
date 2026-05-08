@@ -19,7 +19,6 @@ type ScreenshotTranslationMethod = NonNullable<Settings['screenshotTranslation']
 
 const APPLE_INTELLIGENCE_BASE_URL = 'applefoundation://local'
 
-/** 解析 webview hash query：'#lens?mode=translate' → 'translate' */
 function readModeFromHash(): Mode {
   if (typeof window === 'undefined') return 'chat'
   const hash = window.location.hash || ''
@@ -724,7 +723,6 @@ function extractOptimizedPromptForInput(value: string): string {
   return stripMarkdownFence(extracted || text)
 }
 
-/** Canvas 缩放截图为小缩略图，避免历史记录把整张原图（几 MB）写进 localStorage */
 async function makeThumbnail(dataUrl: string, maxSize: number): Promise<string> {
   if (!dataUrl) return ''
   return new Promise((resolve) => {
@@ -764,7 +762,6 @@ function drawArrow(
   const angle = Math.atan2(dy, dx)
   const headAngle = (ARROW_HEAD_ANGLE_DEG * Math.PI) / 180
 
-  // 箭杆终点回退一格,避免三角覆盖时尾端有缺口
   const shaftEndX = x2 - Math.cos(angle) * (headSize * 0.6)
   const shaftEndY = y2 - Math.sin(angle) * (headSize * 0.6)
 
@@ -780,7 +777,6 @@ function drawArrow(
   ctx.lineTo(shaftEndX, shaftEndY)
   ctx.stroke()
 
-  // 三角箭头
   const wing1X = x2 - Math.cos(angle - headAngle) * headSize
   const wing1Y = y2 - Math.sin(angle - headAngle) * headSize
   const wing2X = x2 - Math.cos(angle + headAngle) * headSize
@@ -814,8 +810,6 @@ async function composeAnnotatedImage(
 
   ctx.drawImage(img, 0, 0)
 
-  // 逻辑像素 → 物理像素的等比缩放
-  // capturedFrame.width 是逻辑像素;PNG 是物理像素 → naturalWidth 大于等于 width
   const scaleX = frameWidth > 0 ? img.naturalWidth / frameWidth : 1
   const scaleY = frameHeight > 0 ? img.naturalHeight / frameHeight : 1
   const lineWidth = Math.max(3, img.naturalWidth / 400)
@@ -849,7 +843,6 @@ function ArrowSvg({ arrow }: { arrow: Arrow }) {
   const len = Math.hypot(dx, dy)
   if (len < 1) return null
 
-  // SVG 在逻辑像素坐标系下渲染 → 线宽用屏幕粗细,合成时再按 PNG 物理像素重算
   const lineWidth = 4
   const headSize = lineWidth * 4
   const angle = Math.atan2(dy, dx)
@@ -904,7 +897,6 @@ function loadHistoryFromStorage(): HistoryItem[] {
   }
 }
 
-/** 把历史写回 localStorage。失败时只 console.error 不抛（quota 满 / 隐私模式等） */
 function saveHistoryToStorage(history: HistoryItem[]) {
   try {
     localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(history))
@@ -920,7 +912,6 @@ type Metrics = {
   SELECT_BOTTOM_OFFSET: number
 }
 
-/** 多屏适配：基于当前 viewport 算"比例 + 上下限"，不同分辨率/屏幕大小都能落到舒适区间。 */
 const computeMetrics = (vw: number, vh: number): Metrics => ({
   READY_W: Math.round(Math.max(420, Math.min(720, vw * 0.42))),
   SELECT_W: Math.round(Math.max(480, Math.min(820, vw * 0.5))),
@@ -928,14 +919,12 @@ const computeMetrics = (vw: number, vh: number): Metrics => ({
   SELECT_BOTTOM_OFFSET: Math.round(Math.max(80, Math.min(160, vh * 0.13))),
 })
 
-/** 计算 select 态对话栏在 webview 内的位置（webview 全屏，所以用 viewport 大小） */
 const computeSelectBar = (vw: number, vh: number, m: Metrics): BarRect => ({
   x: Math.round(vw / 2 - m.SELECT_W / 2),
   y: Math.round(vh - m.SELECT_BOTTOM_OFFSET - READY_BAR_H),
   width: m.SELECT_W,
 })
 
-/** 估算 token 数：ASCII 按 ~4 字符/token；非 ASCII（中日韩等）按 1 字符/token */
 function estimateTokens(text: string): number {
   let ascii = 0
   for (let i = 0; i < text.length; i++) {
@@ -950,7 +939,6 @@ function formatTokens(n: number): string {
   return `${n}`
 }
 
-/** 思维链区块（Claude Code 风格）：默认折叠，header 显示耗时 + token 估算。点击展开/收起。 */
 function ThinkingBlock({
   reasoning,
   active,
@@ -968,7 +956,6 @@ function ThinkingBlock({
   const startRef = useRef<number | null>(null)
   const bodyRef = useRef<HTMLDivElement>(null)
 
-  // 跟踪 active：开始计时 / 停止计时并锁定最终耗时
   useEffect(() => {
     if (active && startRef.current === null) {
       startRef.current = Date.now()
@@ -979,14 +966,12 @@ function ThinkingBlock({
     }
   }, [active])
 
-  // active 期间每秒刷一次 now，header 显示走秒效果
   useEffect(() => {
     if (!active) return
     const id = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(id)
   }, [active])
 
-  // 展开时自动滚到底，方便流式中跟读
   useEffect(() => {
     if (open && active && bodyRef.current) {
       bodyRef.current.scrollTop = bodyRef.current.scrollHeight
@@ -1090,16 +1075,6 @@ function ShareXInfoLabel({ rect, text, viewport }: { rect: Rect; text: string; v
   )
 }
 
-/**
- * Lens 模式：单 webview 三态机，统一 DOM。
- * - select：webview 全屏 + 灰幕 + hover 应用窗口高亮 + 区域 drag + 底部对话栏（纯文字直发）
- * - ready：截图后对话栏 CSS transition 飞到选区附近，加缩略图，输入聚焦
- * - answering：对话栏下方展开 answer 区（透明背景，对话栏不动）
- *
- * 截图后有两种布局：
- * - 全屏保留模式：webview 仍覆盖屏幕，只让对话栏在前端飞到选区附近。
- * - 原生浮窗模式：先把 Lens 窗口缩成真实小窗口，再移动这个原生窗口到选区附近。
- */
 export default function Lens() {
   const [stage, setStage] = useState<Stage>('select')
   const [windows, setWindows] = useState<LensWindowInfo[]>([])
@@ -1128,7 +1103,6 @@ export default function Lens() {
   const [keepFullscreen, setKeepFullscreen] = useState(true)
   const [floatingRebased, setFloatingRebased] = useState(false)
   const [mode, setMode] = useState<Mode>(() => readModeFromHash())
-  // translate 模式专用：OCR 原文 + 翻译结果 + 计时
   const [translateOriginal, setTranslateOriginal] = useState('')
   const [translateOriginalError, setTranslateOriginalError] = useState('')
   const [translateText, setTranslateText] = useState('')
@@ -1150,7 +1124,6 @@ export default function Lens() {
   const showTranslateOriginalRef = useRef(true)
   const translateOriginalRef = useRef('')
   const translateTextRef = useRef('')
-  // viewport 大小：监听 resize（拔显示器/系统缩放变化都会触发），所有相对尺寸由此重算
   const [viewport, setViewport] = useState(() => ({
     w: typeof window !== 'undefined' ? window.innerWidth : 1280,
     h: typeof window !== 'undefined' ? window.innerHeight : 800,
@@ -1161,20 +1134,17 @@ export default function Lens() {
     const h = typeof window !== 'undefined' ? window.innerHeight : 800
     return computeSelectBar(w, h, computeMetrics(w, h))
   })
-  // barIntro：select 态首次显示时给对话栏加一次 scale-up 进入动画；之后切换都靠 transition
   const [barIntro, setBarIntro] = useState(true)
   // barNoTransition：reset 时临时禁用 left/top/width transition，避免上次 ready/answering 位置
   // 残留的 380ms 动画在 window hide 时被暂停，下次 show 时从中间帧续播 → 视觉上 bar
   // 从老位置"滑"回 select 默认位置的闪烁。
   const [barNoTransition, setBarNoTransition] = useState(false)
   const [barFlyOffset, setBarFlyOffset] = useState<Point>({ x: 0, y: 0 })
-  // 原生小浮窗创建和飞入期间临时隐藏内容，避免先露出旧的全屏坐标。
   const [barRebaseHidden, setBarRebaseHidden] = useState(false)
   // 截图后输入栏会从 select 位置飞到截图附近。Windows 原生命中裁剪不能在动画中裁得太紧，
   // 否则 WebView 会把正在飞行的卡片裁掉。
   const [barInFlight, setBarInFlight] = useState(false)
   const [jellyActive, setJellyActive] = useState(false)
-  // capturedFrame：保留最后一次截图选区/窗口的高亮框，作为"已截图"视觉标记，ready/answering 态继续显示
   const [capturedFrame, setCapturedFrame] = useState<CapturedFrame | null>(null)
   // 箭头标注:仅 stage==='ready' 子模式
   // arrows / draftArrow 坐标系 = capturedFrame 逻辑像素 (左上角为原点)
@@ -1189,7 +1159,6 @@ export default function Lens() {
       setDraftArrow(null)
     }
   }, [stage])
-  // 内存历史：单次 app 生命周期保留，esc/hide 不清空
   const [history, setHistory] = useState<HistoryItem[]>(loadHistoryFromStorage)
   const [historyOpen, setHistoryOpen] = useState(false)
   const [hitRegionRect, setHitRegionRect] = useState<Rect | null>(null)
@@ -1231,7 +1200,6 @@ export default function Lens() {
   // selectionText 异步 take 的重入 token：每次 enterSelect / resetBeforeHide / restoreHistory 都 +1，
   // 老请求看到 myReq !== current 直接丢弃，避免 take 完成时已经进入新会话被错误注入。
   const selectionReqIdRef = useRef(0)
-  // 答案区滚动容器，stream 时自动滚到底部
   const chatScrollRef = useRef<HTMLDivElement>(null)
   // 浮动模式下保存截图时的全屏 metrics，避免窗口缩小后 answerLayout 被压缩得太小
   const fullscreenMetricsRef = useRef<Metrics | null>(null)
@@ -1350,15 +1318,12 @@ export default function Lens() {
     }, 48)
   }, [flushLensStreamBuffer])
 
-  // 选中文本行数：translate 模式不计；空 / 仅空白 → 0（驱动徽章是否显示）
   const selectionLineCount = useMemo(() => {
     if (mode !== 'chat') return 0
     if (!selectionText.trim()) return 0
     return selectionText.split(/\r?\n/).length
   }, [selectionText, mode])
 
-  // 加载设置：语言 + 消息顺序。keepFullscreen 按当前 mode 读对应配置:
-  // chat 模式读 settings.lens.keepFullscreenAfterCapture，translate 模式读 settings.screenshotTranslation.keepFullscreenAfterCapture。
   useEffect(() => {
     void (async () => {
       try {
@@ -1421,7 +1386,6 @@ export default function Lens() {
     if (e.animationName === 'lens-jelly-pop') setJellyActive(false)
   }, [])
 
-  // select 态进入：刷新所有 state、重算对话栏位置、播放 intro 动画
   const enterSelect = useCallback(async () => {
     setLensCursorPassthrough(false)
     void api.lensSetHitRegion(null).catch(err => console.error('[lens-floating] clear hit region failed:', err))
@@ -1450,8 +1414,6 @@ export default function Lens() {
     fullscreenMetricsRef.current = null
     chatAutoFollowRef.current = true
     resetLensStreamBuffer()
-    // 防御：reset 流程会 setMessages([]) + setStreaming(false)，理论上 messages.length===0 effect 不会进
-    // 持久化分支，但显式清零更稳
     justFinishedStreamRef.current = false
     // 用 flushSync 同步提交所有 reset 后的状态：webview show 之前 DOM 必须已经反映新位置，
     // 否则 Rust 的 show() 会先把旧 frame 露出来。
@@ -1492,12 +1454,9 @@ export default function Lens() {
       setViewport({ w, h })
       setBarRect(computeSelectBar(w, h, computeMetrics(w, h)))
       setCapturedFrame(null)
-      // 重置 intro：先关再开，下一帧让 transition 从 scale-90 到 scale-100
       setBarIntro(false)
     })
     imageIdRef.current = ''
-    // 重新加载设置：用户在设置面板修改后关闭再打开 Lens，需要读到最新值。按当前 mode 选 lens / screenshotTranslation 配置。
-    // 首帧 reset 先同步提交，避免等待设置读取时露出上一轮 Lens surface。
     try {
       const settings = await api.getSettings()
       const curMode = readModeFromHash()
@@ -1591,9 +1550,6 @@ export default function Lens() {
     }
   }, [focusLensInput])
 
-  // viewport resize（拔显示器 / 切分辨率 / DPI 变更，以及原生浮窗尺寸变化）
-  // 都触发 'resize' 事件 → 更新 viewport state，让相对尺寸 metrics 重算。
-  // 注意：原生浮窗创建和移动在 flyBarToAnchor 里完成，不在 resize handler 里抢占 barRect。
   useEffect(() => {
     const onResize = () => {
       setViewport({ w: window.innerWidth, h: window.innerHeight })
@@ -1602,7 +1558,6 @@ export default function Lens() {
     return () => window.removeEventListener('resize', onResize)
   }, [])
 
-  // viewport 或 metrics 变化时，select 态重算底部 bar 位置（ready/answering 态保持当前飞入位置不动，避免对话中闪跳）
   useEffect(() => {
     if (stageRef.current === 'select') {
       setBarRect(computeSelectBar(viewport.w, viewport.h, metrics))
@@ -1647,7 +1602,6 @@ export default function Lens() {
     return () => { cancelled = true }
   }, [mode, streaming, messages, imagePreview, appLabel, capturedFrame])
 
-  // history 任意变化：1) 同步 localStorage  2) 检测淘汰并删除磁盘上对应的 PNG
   const prevHistoryIdsRef = useRef<Set<string>>(new Set(history.map(h => h.id)))
   useEffect(() => {
     saveHistoryToStorage(history)
@@ -1811,7 +1765,6 @@ export default function Lens() {
     resetAfterClose()
   }, [clearLensStreamFlushTimer, flushLensStreamBuffer, resetAfterClose, setLensCursorPassthrough, streaming])
 
-  // 全局 Esc：流式时先取消模型输出，再关闭 Lens。
   useEffect(() => {
     const handler = async (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
@@ -1821,16 +1774,12 @@ export default function Lens() {
     return () => window.removeEventListener('keydown', handler)
   }, [closeLikeEscape])
 
-  // drawMode 键盘:Cmd+Z 撤销最后一支箭头,Esc 退出 drawMode(arrows 保留)
   useEffect(() => {
     if (!drawMode) return
     const onKey = (e: KeyboardEvent) => {
-      // 输入框聚焦时不拦截,让用户继续打字
       const target = e.target as HTMLElement | null
       const isInput = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA'
 
-      // Esc:无论焦点在哪都退出 drawMode,并阻止全局 Esc 关掉 Lens
-      // (输入栏 autoFocus 时 isInput=true,但 Esc 在输入框里没有合法语义,直接接管)
       if (e.key === 'Escape') {
         e.preventDefault()
         e.stopPropagation()
@@ -1865,18 +1814,15 @@ export default function Lens() {
     return () => window.removeEventListener('blur', handleBlur)
   }, [resetAfterClose])
 
-  /** webview client 坐标 → 全局逻辑坐标（与 CGWindow bounds 同坐标系） */
   const clientToGlobal = (p: Point): Point => ({
     x: winOrigin.x + p.x,
     y: winOrigin.y + p.y,
   })
 
-  /** 命中检测：找第一个包含该全局坐标的应用窗口 */
   const hitTest = (gp: Point): LensWindowInfo | null => {
     return findWindowAt(windows, gp)
   }
 
-  // 拖动选区矩形（webview 内坐标）
   const dragRect = useMemo(() => {
     if (!dragStart || !dragCurrent) return null
     const x = Math.min(dragStart.x, dragCurrent.x)
@@ -1886,7 +1832,6 @@ export default function Lens() {
     return { x, y, width: w, height: h }
   }, [dragStart, dragCurrent])
 
-  // hover 高亮区（webview 内坐标）
   const hoverRect = useMemo(() => {
     if (!hovered || dragging) return null
     return {
@@ -2008,11 +1953,9 @@ export default function Lens() {
     } else if (spaceLeft >= READY_W) {
       targetX = ax - READY_W - ANCHOR_GAP
     } else {
-      // 左右都放不下完整 bar：贴空间更大的一侧屏幕边
       targetX = spaceRight >= spaceLeft ? vw - READY_W - 16 : 16
     }
 
-    // 垂直：与选区中心对齐；总高度需容纳 bar + 8 + answer 区
     const totalH = READY_BAR_H + 8 + ANSWER_H
     let targetY = ay + anchorH / 2 - READY_BAR_H / 2
     if (targetY + totalH > vh - 16) targetY = vh - totalH - 16
@@ -2021,7 +1964,6 @@ export default function Lens() {
     if (targetX < 16) targetX = 16
     if (targetX + READY_W > vw - 16) targetX = vw - READY_W - 16
 
-    // translate 模式截完直接进 translating；chat 模式进 ready 等用户提问
     const targetStage: Stage = activeMode === 'translate' ? 'translating' : 'ready'
     const targetHeight = targetStage === 'translating'
       ? READY_BAR_H + FLOATING_GAP + ANSWER_H
@@ -2038,8 +1980,6 @@ export default function Lens() {
     }
   }
 
-  /** 截图后 lens 默认模式：在前端直接算 bar 位置，让对话栏飞到选区左/右侧（不再上下出现）。
-   *  优先右侧，右侧空间不够再放左侧；都不够时贴大空间一侧。垂直与选区中心对齐并 clamp 在 viewport 内。 */
   const flyBarToAnchor = async (
     anchorAbsX: number,
     anchorAbsY: number,
@@ -2165,9 +2105,6 @@ export default function Lens() {
     }
   }
 
-  /** translate 模式：截完立即调 OCR + 翻译。
-   *  流式：lens-translate-stream 事件累积 original/translated；done 事件结束并锁定耗时
-   *  非流式：API 返回完整结果一次性灌入（也通过事件，后端在两步完成后 emit 一次完整 delta） */
   const runTranslate = useCallback(async (id: string) => {
     if (translateEditDebounceRef.current) {
       clearTimeout(translateEditDebounceRef.current)
@@ -2188,7 +2125,6 @@ export default function Lens() {
     try {
       const r = await api.lensTranslate(id)
       if (!r.success) {
-        // 失败兜底：done 事件应该已经带 error 了，但补一刀防止前端漏 done
         const message = r.error || 'Failed'
         if (!showTranslateOriginalRef.current || translateOriginalRef.current.trim() || translateTextRef.current.trim()) {
           setTranslateError(message)
@@ -2201,7 +2137,6 @@ export default function Lens() {
         }
         setStage('translated')
       }
-      // 成功路径：等 lens-translate-stream 的 done 事件触发 stage / 计时（避免事件还没到 stage 就跳，或反之文字还没到完成态）
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       if (!showTranslateOriginalRef.current || translateOriginalRef.current.trim() || translateTextRef.current.trim()) {
@@ -2513,7 +2448,6 @@ export default function Lens() {
     translationMethodSwitching,
   ])
 
-  // lens-translate-stream 事件监听（与 lens-stream 同款 cancelled 旗标处理 StrictMode 双挂）
   useEffect(() => {
     let cancelled = false
     let unlisten: (() => void) | undefined
@@ -2552,7 +2486,6 @@ export default function Lens() {
     }
   }, [])
 
-  // translating 期间每秒刷一次，header 走秒
   useEffect(() => {
     if (stage !== 'translating') return
     const id = setInterval(() => setTranslateNow(Date.now()), 1000)
@@ -2590,7 +2523,6 @@ export default function Lens() {
 
       imageIdRef.current = newId
 
-      // 记录截图框（webview 内坐标）作为已截视觉标记，截完保留显示
       setCapturedFrame(frame)
       void (async () => {
         try {
@@ -2958,7 +2890,6 @@ export default function Lens() {
   }, [playSpeechDataUrl, speakingTarget, speechLoadingTarget, stopSpeechPlayback])
 
   const handleCopy = async () => {
-    // 复制最后一条 assistant 消息
     const lastAssistant = [...messages].reverse().find(m => m.role === 'assistant' && m.content)
     if (!lastAssistant) return
     await copyTextWithFeedback(lastAssistant.content, 'answer')
@@ -2966,17 +2897,38 @@ export default function Lens() {
 
   // 点击历史项：把当前会话恢复到该 item（image / appLabel / messages / capturedFrame）
   // 取消任何正在跑的流，避免后端继续 emit delta 灌入新恢复的 messages（如果新旧 imageId 巧合相同会污染）
-  const restoreHistory = (item: HistoryItem) => {
+  const restoreHistory = async (item: HistoryItem) => {
     setHistoryOpen(false)
     cancelPromptOptimization()
+    stopSpeechPlayback()
     if (streaming) {
       void api.lensCancelStream().catch(err => console.error(err))
     }
+    resetLensStreamBuffer()
+    setLensCursorPassthrough(false)
     imageIdRef.current = item.id
     chatAutoFollowRef.current = true
-    // 防御：恢复历史 setMessages 会触发持久化 effect，但本路径不是"流刚结束"，不该 push 重复条目
     justFinishedStreamRef.current = false
+    const restoreSeq = ++nativeFlySeqRef.current
+    if (barFlightTimerRef.current) {
+      clearTimeout(barFlightTimerRef.current)
+      barFlightTimerRef.current = null
+    }
+    panelDraggingRef.current = false
+    fullscreenMetricsRef.current = metrics
+
+    const wasFloating = floatingRebased
+    const width = Math.round(barRect.width || metrics.READY_W)
+    const height = Math.round(READY_BAR_H + FLOATING_GAP + metrics.ANSWER_H)
+    const localX = wasFloating ? 0 : Math.max(16, Math.min(viewport.w - width - 16, barRect.x))
+    const localY = wasFloating ? 0 : Math.max(16, Math.min(viewport.h - height - 16, barRect.y))
+    const origin = {
+      x: Math.round(winOrigin.x + localX),
+      y: Math.round(winOrigin.y + localY),
+    }
+
     flushSync(() => {
+      setMode('chat')
       setImagePreview(item.imagePreview)
       setAppLabel(item.appLabel)
       setInput('')
@@ -2984,19 +2936,55 @@ export default function Lens() {
       setMessages(item.messages)
       setCapturedFrame(item.capturedFrame)
       setStreaming(false)
+      setFloatingRebased(false)
+      setNativeHitRegionActive(false)
+      setHitRegionRect(null)
+      setPanelDragActive(false)
+      setBarNoTransition(true)
       setBarFlyOffset({ x: 0, y: 0 })
-      setBarRebaseHidden(false)
+      setBarRebaseHidden(true)
       setBarInFlight(false)
       setJellyActive(false)
       setSelectBarCollapsed(false)
+      setBarRect({ x: 0, y: 0, width })
+      floatingSizeRef.current = null
       setStage('answering')
     })
-    // 老 takeLensSelection promise 失效，避免恢复历史后被新 take 文本污染
     selectionReqIdRef.current++
-    focusLensInput([50, 140, 260])
+    focusReqIdRef.current++
+
+    try {
+      await api.lensSetHitRegion(null)
+      await api.lensSetFloating({
+        x: origin.x,
+        y: origin.y,
+        width,
+        height,
+      })
+      if (restoreSeq !== nativeFlySeqRef.current) return
+      flushSync(() => {
+        setFloatingRebased(true)
+        setWinOrigin(origin)
+        setViewport({ w: width, h: height })
+        setBarRect({ x: 0, y: 0, width })
+        setBarRebaseHidden(false)
+        setBarNoTransition(false)
+        floatingSizeRef.current = { width, height }
+      })
+      focusLensInput([30, 120, 260])
+    } catch (err) {
+      console.error('[lens-history] native floating restore failed:', err)
+      if (restoreSeq !== nativeFlySeqRef.current) return
+      flushSync(() => {
+        setFloatingRebased(false)
+        setBarRebaseHidden(false)
+        setBarNoTransition(false)
+        setBarRect({ x: Math.round(localX), y: Math.round(localY), width })
+      })
+      focusLensInput([50, 140, 260])
+    }
   }
 
-  // 相对时间字符串（"刚刚" / "3 分钟前"）
   const relTime = (ts: number): string => {
     const diff = Date.now() - ts
     const m = Math.floor(diff / 60000)
@@ -3020,7 +3008,6 @@ export default function Lens() {
     setLensCursorPassthrough(false)
   }, [setLensCursorPassthrough, stopSpeechPlayback])
 
-  // 点击 history 面板外部 → 关闭
   useEffect(() => {
     if (!historyOpen) return
     const onDown = (e: MouseEvent) => {
@@ -3032,16 +3019,12 @@ export default function Lens() {
     return () => document.removeEventListener('mousedown', onDown, true)
   }, [historyOpen])
 
-  // ====== 单一渲染 ======
   const showThumb = stage !== 'select' && (imagePreview || appLabel)
-  // 流式期间禁止发送/输入，答完之后可对同一张截图继续问新问题（每次仍为独立 Q&A，自动入历史）
   const canSendBlankImageAnalysis = mode === 'chat' && stage === 'ready' && messages.length === 0 && capturedFrame !== null
   const canOptimizePrompt = !!input.trim() && !streaming && !promptOptimizing
   const sendDisabled = streaming || promptOptimizing || (!input.trim() && !canSendBlankImageAnalysis)
-  // 对话栏（输入框）只在 chat 模式显示；translate 模式只渲染浮动结果卡片
   const showBar = mode === 'chat'
   const hideSelectBar = mode === 'chat' && stage === 'select' && selectBarCollapsed
-  // translate 浮动卡片：截图后在选区旁出现，加载/完成两态
   const showTranslateCard = mode === 'translate' && (stage === 'translating' || stage === 'translated')
   const readonlyAiOcrOriginal = translateOcrMethod === 'ai'
   const methodSwitching = ocrMethodSwitching || translationMethodSwitching
@@ -3440,7 +3423,6 @@ export default function Lens() {
     winOrigin.y,
   ])
 
-  // 浮动模式下：stage / 布局变化时动态调整窗口尺寸
   useEffect(() => {
     if (stage === 'select') return
     if (!floatingRebased) return
@@ -3453,7 +3435,6 @@ export default function Lens() {
       h += FLOATING_GAP + answerLayout.height
     }
 
-    // translate 卡片预留空间
     if ((stage === 'translating' || stage === 'translated') && mode === 'translate') {
       h = Math.max(
         h,
@@ -3470,7 +3451,6 @@ export default function Lens() {
       return
     }
 
-    // 只更新尺寸，位置不变（不传 x/y）
     api.lensSetFloating({ width: w, height: h })
       .then(() => {
         floatingSizeRef.current = { width: w, height: h }
@@ -3556,7 +3536,6 @@ export default function Lens() {
         cursor: stage === 'select' ? 'crosshair' : undefined,
       }}
     >
-      {/* select 态遮罩：按 TrOCR/ShareX 的灰幕强度变暗；拖拽选区内保持清晰，hover 只画边框。 */}
       {stage === 'select' && (
         <div className="absolute inset-0 pointer-events-none">
           {!selectFocusRect ? (
@@ -3614,9 +3593,7 @@ export default function Lens() {
         </div>
       )}
 
-      {/* 已截图框：沿用 TrOCR/ShareX 黑实线 + 白色流动虚线边框。 */}
-      {/* 浮动模式下不显示高亮框 */}
-      {capturedFrame && stage !== 'select' && keepFullscreen && !floatingRebased && (
+      {capturedFrame && stage !== 'select' && keepFullscreen && !floatingRebased && !barRebaseHidden && (
         <>
           <ShareXSelectionFrame rect={capturedFrame} />
           <ShareXInfoLabel
@@ -3627,8 +3604,7 @@ export default function Lens() {
         </>
       )}
 
-      {/* drawMode 关闭时也持续显示已落下的箭头 */}
-      {capturedFrame && stage === 'ready' && keepFullscreen && !floatingRebased && !drawMode && arrows.length > 0 && (
+      {capturedFrame && stage === 'ready' && keepFullscreen && !floatingRebased && !barRebaseHidden && !drawMode && arrows.length > 0 && (
         <svg
           className="absolute pointer-events-none"
           style={{
@@ -3648,9 +3624,7 @@ export default function Lens() {
         </svg>
       )}
 
-      {/* drawMode:在 capturedFrame 矩形内画箭头.透明 div 收事件、SVG 渲染,
-          不加 dim、不再贴 imagePreview 背景,直接显示原画面 */}
-      {capturedFrame && stage === 'ready' && keepFullscreen && !floatingRebased && drawMode && (
+      {capturedFrame && stage === 'ready' && keepFullscreen && !floatingRebased && !barRebaseHidden && drawMode && (
         <div
           className="absolute"
           style={{
@@ -3690,10 +3664,9 @@ export default function Lens() {
             ;(e.currentTarget as HTMLDivElement).releasePointerCapture(e.pointerId)
           }}
           onPointerCancel={(e) => {
-            // 浏览器主动释放捕获(例如系统对话框打断),清掉 draft
             e.stopPropagation()
             setDraftArrow(null)
-            try { (e.currentTarget as HTMLDivElement).releasePointerCapture(e.pointerId) } catch { /* 已被释放,忽略 */ }
+            try { (e.currentTarget as HTMLDivElement).releasePointerCapture(e.pointerId) } catch { void 0 }
           }}
         >
           <svg
@@ -3710,7 +3683,6 @@ export default function Lens() {
         </div>
       )}
 
-      {/* select-only：TrOCR/ShareX 风格自动窗口框和拖拽选区。 */}
       {stage === 'select' && (
         <>
           {selectFrameRect && (
@@ -3722,10 +3694,6 @@ export default function Lens() {
         </>
       )}
 
-      {/* 对话栏 + 答案区：始终渲染，CSS transition 处理位置 / 大小变化。
-          - select：底部居中 680，缩略图槽位用 sparkle 占位
-          - ready：飞到选区附近 600，左侧切换为缩略图 + 应用名
-          - answering：在对话栏下方 absolute 展开 answer 区（固定 360 高） */}
       {showBar && (
         <div
           ref={barPanelRef}
@@ -3749,7 +3717,6 @@ export default function Lens() {
             pointerEvents: hideSelectBar || barRebaseHidden ? 'none' : undefined,
           }}
         >
-          {/* 输入栏卡片 */}
           <div
             className={`flex items-center gap-3 pl-4 pr-2 py-2 rounded-[18px] bg-white dark:bg-neutral-900 shadow-[0_10px_28px_-20px_rgba(0,0,0,0.28)] ring-1 ring-black/[0.04] dark:ring-white/[0.06] ${stage === 'select' ? 'cursor-default' : 'cursor-move'}`}
             onMouseDown={beginFloatingPanelDrag}
@@ -3820,7 +3787,6 @@ export default function Lens() {
               placeholder={t.lensAskPlaceholder}
               className={`flex-1 bg-transparent text-[16px] text-neutral-900 dark:text-white placeholder-neutral-500 dark:placeholder-neutral-400 focus:outline-none cursor-text ${streaming || promptOptimizing ? 'opacity-60' : ''}`}
             />
-            {/* History dropdown：按钮 + 弹出面板（容器作为 ref，点击外部关闭） */}
             <div ref={historyPanelRef} className="relative shrink-0">
               <button
                 type="button"
@@ -3866,7 +3832,7 @@ export default function Lens() {
                           <button
                             key={`${item.id}-${item.timestamp}`}
                             type="button"
-                            onClick={() => restoreHistory(item)}
+                            onClick={() => void restoreHistory(item)}
                             className="w-full flex items-center gap-2 px-2.5 py-1.5 text-left hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition-colors cursor-pointer"
                           >
                             <div className="shrink-0 w-6 h-6 rounded overflow-hidden bg-neutral-100 dark:bg-neutral-800 ring-1 ring-black/[0.05] dark:ring-white/[0.06] flex items-center justify-center">
@@ -3937,7 +3903,6 @@ export default function Lens() {
             </button>
           </div>
 
-          {/* select 态键盘提示（在对话栏卡片下方） */}
           {stage === 'select' && (
             <div className="mt-2 flex justify-center gap-3 text-[11px] text-white/70 pointer-events-none">
               <span>↵ {t.lensHintSend}</span>
@@ -3946,7 +3911,6 @@ export default function Lens() {
             </div>
           )}
 
-          {/* answer 区：absolute 展开在对话栏上方或下方（自适应空间），渲染整个 chat list（多轮对话） */}
           <div
             ref={answerPanelRef}
             className="absolute left-0 right-0 rounded-2xl overflow-hidden window-frosted transition-all ease-out select-text"
@@ -3960,7 +3924,6 @@ export default function Lens() {
             }}
           >
             {stage === 'answering' && (() => {
-              // 显示顺序：desc 反转数组（新在顶）；isLast 始终基于原数组末尾索引（最新的）
               const ordered = messageOrder === 'desc' ? messages.slice().reverse() : messages
               const lastChronoIdx = messages.length - 1
               const lastMsg = messages[lastChronoIdx]
@@ -3991,7 +3954,6 @@ export default function Lens() {
                 className="h-full overflow-y-auto custom-scrollbar px-3.5 py-3"
                 onScroll={updateChatAutoFollow}
               >
-                {/* desc 模式下操作按钮放最前（贴最新答案） */}
                 {messageOrder === 'desc' && showActions && Actions}
                 {ordered.map((m, displayIdx) => {
                   const origIdx = messageOrder === 'desc' ? messages.length - 1 - displayIdx : displayIdx
@@ -4026,7 +3988,6 @@ export default function Lens() {
                     </div>
                   )
                 })}
-                {/* asc 模式下操作按钮在末尾 */}
                 {messageOrder === 'asc' && showActions && Actions}
               </div>
               )
@@ -4035,8 +3996,6 @@ export default function Lens() {
         </div>
       )}
 
-      {/* translate 模式浮动结果卡：原文 + 译文，复用 barRect 锚点。
-          外层 select-none 用 select-text 覆盖，让用户可选中复制部分文本。 */}
       {showTranslateCard && (
         <div
           ref={translateCardRef}
@@ -4063,7 +4022,6 @@ export default function Lens() {
           }}
           data-tauri-drag-region="false"
         >
-          {/* 顶部缩略图 + 应用名 + 状态徽章（耗时 / token 估算） */}
           <div
             className="flex items-center gap-2.5 px-3.5 py-2.5 border-b border-black/[0.05] dark:border-white/[0.06] cursor-move"
             onMouseDown={beginFloatingPanelDrag}
@@ -4103,7 +4061,6 @@ export default function Lens() {
             </button>
           </div>
 
-          {/* 内容区 */}
           <div className="px-3.5 py-3 overflow-y-auto custom-scrollbar"
             style={{
               maxHeight: isFloatingLayout || !keepFullscreen
@@ -4111,7 +4068,6 @@ export default function Lens() {
                 : Math.min(viewport.h - 110, stableAnswerHeight)
             }}>
             <>
-              {/* OCR 结果：后端 OCR 完成后立即 emit original，先于翻译完成显示在上方。 */}
               {showTranslateOriginal && (
                 <div>
                   <div className="mb-1.5 flex items-center gap-1.5">
@@ -4186,7 +4142,6 @@ export default function Lens() {
                 <div className="border-t border-black/[0.05] dark:border-white/[0.06] -mx-3.5 my-3" />
               )}
 
-              {/* 翻译结果：位于 OCR 下方，流式翻译时继续逐段追加；翻译报错只显示在这里，不覆盖 OCR 结果。 */}
               <div className="mb-1.5 flex items-center gap-1.5">
                 <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-neutral-400 dark:text-neutral-500">
                   {t.shotTranslated}

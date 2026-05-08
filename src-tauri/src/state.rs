@@ -13,10 +13,6 @@ use reqwest::Client;
 use crate::apple_intelligence::AppleIntelligenceClient;
 use crate::settings::Settings;
 
-/// 应用全局状态
-/// 使用 RwLock 保护 settings，允许多读单写；
-/// Mutex 用于 explain_images 等需要独占访问的数据；
-/// AtomicBool 标记 lens 是否正在进行，防止并发热键触发。
 pub struct AppState {
     pub settings: RwLock<Settings>,
     pub explain_images: Mutex<HashMap<String, PathBuf>>,
@@ -43,25 +39,23 @@ pub struct AppState {
     pub apple_intelligence: Arc<AppleIntelligenceClient>,
 }
 
-/// 单个 key 触发 failover 后的冷却时长。
 pub const KEY_COOLDOWN: Duration = Duration::from_secs(60);
 
 impl AppState {
-    /// 安全读取设置（锁中毒时返回内部数据，不 panic）
     pub fn settings_read(&self) -> std::sync::RwLockReadGuard<'_, Settings> {
         self.settings.read().unwrap_or_else(|e| e.into_inner())
     }
-    /// 安全写入设置（锁中毒时返回内部数据，不 panic）
+
     pub fn settings_write(&self) -> std::sync::RwLockWriteGuard<'_, Settings> {
         self.settings.write().unwrap_or_else(|e| e.into_inner())
     }
-    /// 安全获取解释图片映射锁
+
     pub fn images_lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, PathBuf>> {
         self.explain_images
             .lock()
             .unwrap_or_else(|e| e.into_inner())
     }
-    /// 安全获取当前解释图片 ID 锁
+
     pub fn current_id_lock(&self) -> std::sync::MutexGuard<'_, Option<String>> {
         self.current_explain_image_id
             .lock()

@@ -1,10 +1,7 @@
-/* 导入 TailwindCSS v4 */
 @import "tailwindcss";
-/* 导入 TailwindCSS 排版插件 */
 @plugin "@tailwindcss/typography";
 
 
-/* 自定义 dark 变体：通过 .dark 类启用深色模式 */
 @custom-variant dark (&:where(.dark, .dark *));
 
 html,
@@ -12,7 +9,6 @@ body {
   height: 100%;
   margin: 0;
   overflow: hidden;
-  /* macOS 透明窗口需要明确透明背景 */
   background-color: transparent;
   background: transparent;
 }
@@ -35,9 +31,6 @@ body {
   box-sizing: border-box;
 }
 
-/* 磨砂玻璃悬浮卡：作为 .window-container 的子元素填满窗口。
-   半透明白底 + 大模糊背景 + hairline 描边 + 一道柔和近对称阴影。
-   阴影偏置只 2-3px（浮起感而非下坠感），靠 blur 散开整圈光晕。 */
 .window-frosted {
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(252, 252, 253, 0.94) 100%);
   -webkit-backdrop-filter: saturate(160%) blur(28px);
@@ -59,7 +52,6 @@ body {
     0 6px 20px rgba(0, 0, 0, 0.4);
 }
 
-/* 自定义滚动条 — 悬浮胶囊式 */
 .custom-scrollbar {
   scrollbar-width: thin;
   scrollbar-color: rgba(0, 0, 0, 0.15) transparent;
@@ -74,7 +66,6 @@ body {
   background: transparent;
 }
 
-/* 使用 background-clip 实现悬浮胶囊效果，hover 时 thumb 变宽 */
 .custom-scrollbar::-webkit-scrollbar-thumb {
   background-color: transparent;
   border-radius: 9999px;
@@ -109,9 +100,6 @@ body {
   background-color: rgba(255, 255, 255, 0.32);
 }
 
-/* ===== Settings 卡片 / 控件统一令牌 =====
-   单点定义阴影/边框/底色，避免内联 box-shadow 在每个 section 重复，
-   也让 light/dark 切换的视觉层级一致。 */
 .settings-card {
   background: #ffffff;
   border: 1px solid rgba(0, 0, 0, 0.04);
@@ -129,7 +117,6 @@ body {
     0 6px 18px -6px rgba(0, 0, 0, 0.5);
 }
 
-/* Settings 内的 input/select/textarea 统一"凹陷"底色，让控件从卡片里浮出 */
 .settings-control {
   background: rgba(0, 0, 0, 0.03);
   border: 1px solid rgba(0, 0, 0, 0.06);
@@ -139,6 +126,14 @@ body {
 }
 .settings-control::placeholder { color: rgb(163, 163, 163); }
 .settings-control:hover { background: rgba(0, 0, 0, 0.04); }
+select.settings-control {
+  color-scheme: light;
+}
+select.settings-control option,
+select.settings-control optgroup {
+  background: #ffffff;
+  color: rgb(15, 23, 42);
+}
 .settings-control:focus,
 .settings-control:focus-visible {
   outline: none;
@@ -154,6 +149,14 @@ body {
 }
 .dark .settings-control::placeholder { color: rgb(115, 115, 115); }
 .dark .settings-control:hover { background: rgba(255, 255, 255, 0.06); }
+.dark select.settings-control {
+  color-scheme: dark;
+}
+.dark select.settings-control option,
+.dark select.settings-control optgroup {
+  background: #1c1c1e;
+  color: rgb(245, 245, 245);
+}
 .dark .settings-control:focus,
 .dark .settings-control:focus-visible {
   background: rgba(255, 255, 255, 0.06);
@@ -161,15 +164,11 @@ body {
   box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.18);
 }
 
-/* Translate 加载态 shimmer：水平滑动的高光，比静态 spinner 显得有进度感 */
 @keyframes shimmer {
   0% { background-position: 200% 0; }
   100% { background-position: -200% 0; }
 }
 
-/* Lens 进入动画：淡入 + 16px 上滑 + 微缩 0.96→1。
-   用于 select 装饰栏 / ready 输入栏 / answering 答案区，
-   遮掩 Tauri set_size 那一帧的瞬移突兀感。 */
 @keyframes lens-rise {
   from {
     opacity: 0;
@@ -243,7 +242,6 @@ body {
   animation: lens-frame-fade 220ms ease-out both;
 }
 
-/* ShareX/TrOCR 截图选区的 marching ants：5px/5px 白色虚线，约 15px/s 滚动。 */
 @keyframes sharex-marching-ants {
   from { stroke-dashoffset: 0; }
   to { stroke-dashoffset: -15; }
@@ -253,7 +251,6 @@ body {
   animation: sharex-marching-ants 1s linear infinite;
 }
 
-/* OCR+翻译浮窗正文：比 Tailwind Typography 默认段落 margin 更紧凑。 */
 .lens-readable-text :where(p) {
   margin-top: 0;
   margin-bottom: 0.4em;

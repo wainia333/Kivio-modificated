@@ -2,9 +2,6 @@ import type { ReactNode } from 'react'
 import { ExternalLink, type LucideIcon } from 'lucide-react'
 import { formatHotkey, getPlatform } from './utils'
 
-/**
- * 开关切换组件 — on 态用 brand 蓝，slider 加双层阴影
- */
 export function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
   return (
     <button
@@ -29,9 +26,6 @@ export function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: 
   )
 }
 
-/**
- * 下拉选择 — 使用 .settings-control 统一控件样式
- */
 export function Select({ value, onChange, options, className = '' }: {
   value: string
   onChange: (v: string) => void
@@ -57,9 +51,6 @@ export function Select({ value, onChange, options, className = '' }: {
   )
 }
 
-/**
- * 文本输入 — 默认 sans，需要等宽时调用方自行加 font-mono
- */
 export function Input({ value, onChange, type = 'text', placeholder = '', className = '', list, mono = false, ...props }: {
   value: string
   onChange: (v: string) => void
@@ -67,7 +58,6 @@ export function Input({ value, onChange, type = 'text', placeholder = '', classN
   placeholder?: string
   className?: string
   list?: string
-  /** 启用 font-mono（仅 baseUrl/apiKey/model 名等代码型字段使用） */
   mono?: boolean
 } & Omit<React.InputHTMLAttributes<HTMLInputElement>, 'value' | 'onChange'>) {
   return (
@@ -84,9 +74,6 @@ export function Input({ value, onChange, type = 'text', placeholder = '', classN
   )
 }
 
-/**
- * 多行文本输入 — 默认 sans
- */
 export function TextArea({ value, onChange, placeholder = '', rows = 2, mono = false }: {
   value: string
   onChange: (v: string) => void
@@ -106,9 +93,6 @@ export function TextArea({ value, onChange, placeholder = '', rows = 2, mono = f
   )
 }
 
-/**
- * 字段标签
- */
 export function Label({ children, className = '' }: { children: ReactNode; className?: string }) {
   return (
     <label className={`block text-[12px] font-medium text-neutral-600 dark:text-neutral-300 mb-1.5 ${className}`}>
@@ -117,9 +101,6 @@ export function Label({ children, className = '' }: { children: ReactNode; class
   )
 }
 
-/**
- * 设置项行（左 label + 可选 description，右控件）
- */
 export function SettingRow({ label, description, children, className = '' }: {
   label: string
   description?: string
@@ -139,9 +120,6 @@ export function SettingRow({ label, description, children, className = '' }: {
   )
 }
 
-/**
- * 权限状态项（macOS）
- */
 export function PermissionItem({
   label,
   granted,
@@ -188,9 +166,6 @@ export function PermissionItem({
   )
 }
 
-/**
- * 键盘按键徽章
- */
 export function KeyBadge({ children }: { children: ReactNode }) {
   return (
     <kbd
@@ -202,9 +177,6 @@ export function KeyBadge({ children }: { children: ReactNode }) {
   )
 }
 
-/**
- * 快捷键展示
- */
 export function HotkeyDisplay({ hotkey }: { hotkey: string }) {
   const platform = getPlatform()
   const keys = formatHotkey(hotkey, platform)
@@ -217,9 +189,6 @@ export function HotkeyDisplay({ hotkey }: { hotkey: string }) {
   )
 }
 
-/**
- * 快捷键输入（含录制态）
- */
 export function HotkeyInput({
   value,
   placeholder,
@@ -270,9 +239,6 @@ export function HotkeyInput({
   )
 }
 
-/**
- * 默认提示词预览（折叠在卡片底部，灰底等宽）
- */
 export function DefaultPrompt({ label, content }: { label: string; content: string }) {
   return (
     <div className="mt-2 rounded-md border border-black/[0.05] dark:border-white/[0.05] bg-neutral-50 dark:bg-neutral-800/40 px-3 py-2">
@@ -286,10 +252,6 @@ export function DefaultPrompt({ label, content }: { label: string; content: stri
   )
 }
 
-/**
- * 区块标题 — 小号灰 uppercase + 左侧 brand 细色条
- * 让标题谦逊，把视觉重心交给卡片本身
- */
 export function SectionTitle({ children, icon: Icon }: { children: ReactNode; icon?: LucideIcon }) {
   return (
     <div className="flex items-center gap-2 mb-2.5 pl-0.5">
@@ -302,9 +264,6 @@ export function SectionTitle({ children, icon: Icon }: { children: ReactNode; ic
   )
 }
 
-/**
- * 分段控制器标签按钮（轻量样式）
- */
 export function TabButton({ active, onClick, label }: {
   active: boolean
   onClick: () => void
